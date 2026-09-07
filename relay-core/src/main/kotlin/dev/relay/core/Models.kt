@@ -103,6 +103,14 @@ data class RelayConfig(
     /** The project's public key (pk_...). Safe to embed. */
     val publicKey: String,
     val tokenProvider: TokenProvider,
+    /**
+     * This app's own applicationId (e.g. `BuildConfig.APPLICATION_ID`, or `context.packageName`).
+     * Sent as X-App-Package-Id on every request — lets the service enforce an optional per-project
+     * app allowlist (PATCH /projects/me/settings' androidPackageIds), so a public key copied out
+     * of this app doesn't work in an unrelated one. Omit to send no header; the service only
+     * checks it when that allowlist is non-empty.
+     */
+    val packageId: String? = null,
     val webSocketUrl: String? = null,
     val pingIntervalMs: Long = 25_000,
     val maxBackoffMs: Long = 30_000,

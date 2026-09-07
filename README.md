@@ -20,6 +20,7 @@ val relay = RelayClient(RelayConfig(
     baseUrl = "https://relay.example.com",
     publicKey = "pk_…",                                     // safe to embed
     tokenProvider = { myBackend.relayToken() },             // POST /users/token on YOUR server with the secret key
+    packageId = BuildConfig.APPLICATION_ID,                 // optional — scopes the key to this app, see Security below
 ))
 
 setContent { MaterialTheme { RelayChat(client = relay) } }  // list → thread → composer, live
@@ -28,6 +29,14 @@ setContent { MaterialTheme { RelayChat(client = relay) } }  // list → thread �
 Call `relay.goToBackground()` from `onStop` and `relay.connect()` from `onStart`; the store
 resyncs after every reconnect (the server never replays missed events). `relay.disconnect()`
 on sign-out.
+
+## Security
+
+Pass `packageId` (your app's `applicationId`, e.g. `BuildConfig.APPLICATION_ID`) in `RelayConfig`
+if the project has an Android package allowlist configured (in the admin panel or via
+`PATCH /projects/me/settings`) — the SDK sends it as `X-App-Package-Id` on every request, and the
+service rejects requests from an app not on that list. Optional and backward compatible: omit it,
+or leave the project's allowlist empty, and nothing is enforced.
 
 ## Calling
 

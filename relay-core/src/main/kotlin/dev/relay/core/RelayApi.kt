@@ -41,9 +41,11 @@ class RelayApi(private val config: RelayConfig, internal val tokens: TokenSource
     suspend fun <T> request(method: String, path: String, body: String? = null, serializer: KSerializer<T>, retryOn401: Boolean = true): T =
         withContext(Dispatchers.IO) {
             val token = tokens.get()
-            val req = Request.Builder().url(base + path)
+            val builder = Request.Builder().url(base + path)
                 .header("X-Relay-Key", config.publicKey)
                 .header("Authorization", "Bearer $token")
+            config.packageId?.let { builder.header("X-App-Package-Id", it) }
+            val req = builder
                 .method(method, body?.toRequestBody(jsonType) ?: if (method == "GET") null else "".toRequestBody(null))
                 .build()
             val response = try { http.newCall(req).execute() } catch (e: java.io.IOException) { throw RelayException(0, "network", e.message ?: "network error") }

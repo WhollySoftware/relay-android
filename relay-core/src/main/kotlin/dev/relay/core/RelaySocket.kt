@@ -85,7 +85,9 @@ class RelaySocket(private val config: RelayConfig, private val tokens: TokenSour
         scope.launch {
             val token = try { tokens.get() } catch (e: Exception) { scheduleReconnect(e.message ?: "token error"); return@launch }
             if (!wantOpen) return@launch
-            val socket = http.newWebSocket(Request.Builder().url(url(token)).build(), object : WebSocketListener() {
+            val requestBuilder = Request.Builder().url(url(token))
+            config.packageId?.let { requestBuilder.header("X-App-Package-Id", it) }
+            val socket = http.newWebSocket(requestBuilder.build(), object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) { config.logger?.invoke("[relay] socket open, waiting for gateway handshake") }
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     if (ws !== webSocket) return

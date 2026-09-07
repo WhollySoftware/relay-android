@@ -24,6 +24,17 @@ class RelayApiTest {
 
     @After fun tearDown() = server.shutdown()
 
+    @Test fun `sends the app package id header only when configured`() = runBlocking {
+        server.enqueue(MockResponse().setBody("""{"user":{"userId":"alice","isOnline":true}}"""))
+        api.me()
+        assertNull(server.takeRequest().getHeader("X-App-Package-Id"))
+
+        val withPackageId = RelayApi(RelayConfig(server.url("/").toString(), "pk_test", { "unused" }, packageId = "com.example.app"), TokenSource { "tok" })
+        server.enqueue(MockResponse().setBody("""{"user":{"userId":"alice","isOnline":true}}"""))
+        withPackageId.me()
+        assertEquals("com.example.app", server.takeRequest().getHeader("X-App-Package-Id"))
+    }
+
     @Test fun `sends key and bearer, decodes envelope`() = runBlocking {
         server.enqueue(MockResponse().setBody("""{"user":{"userId":"alice","displayName":"Alice","isOnline":true}}"""))
         val me = api.me()
