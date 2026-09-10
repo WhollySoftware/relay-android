@@ -1,5 +1,10 @@
 package dev.relay.call
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -7,12 +12,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -34,6 +42,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -42,6 +51,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -71,8 +81,68 @@ fun RelayCallOverlay(center: CallCenter) {
     }
 }
 
+/** Mic (and, for a video call, camera) permissions needed to actually place/answer a call. */
+private fun permissionsFor(type: CallType): List<String> = buildList {
+    add(Manifest.permission.RECORD_AUDIO)
+    if (type == CallType.VIDEO) add(Manifest.permission.CAMERA)
+}
+
+/** A launcher that requests whatever of [permissionsFor] `type` isn't already granted, then runs
+ *  [onGranted] — either immediately (already granted) or once the system prompt resolves. */
+@Composable
+private fun rememberCallAction(onGranted: (CallType) -> Unit): (CallType) -> Unit {
+    val context = LocalContext.current
+    val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    var pending by remember { mutableStateOf<CallType?>(null) }
+    var showSettingsPrompt by remember { mutableStateOf(false) }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+        val type = pending; pending = null
+        when {
+            type == null -> {}
+            results.values.all { it } -> onGranted(type)
+            // The system only shows the request dialog again if the user hasn't permanently
+            // denied it ("Don't allow" a second time, or the very first time on some OEMs/API
+            // levels). If it's still missing after asking, there's no dialog left to show —
+            // the only way forward is the app's own permission screen in system Settings.
+            else -> showSettingsPrompt = true
+        }
+    }
+    if (showSettingsPrompt) {
+        PermissionSettingsDialog(onDismiss = { showSettingsPrompt = false })
+    }
+    return { type ->
+        // The keyboard racing the call UI onto screen looks broken (it covers the local-preview
+        // thumbnail and eats half the call screen on smaller devices) — dismiss it before either
+        // the permission prompt or the call itself can appear.
+        keyboardController?.hide()
+        val missing = permissionsFor(type).filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isEmpty()) onGranted(type) else { pending = type; launcher.launch(missing.toTypedArray()) }
+    }
+}
+
+@Composable
+private fun PermissionSettingsDialog(onDismiss: () -> Unit, message: String = "Camera and microphone access are needed for calls. Enable them in Settings to continue.") {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Permission needed") },
+        text = { Text(message) },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = {
+                onDismiss()
+                context.startActivity(
+                    android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", context.packageName, null))
+                        .apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) },
+                )
+            }) { Text("Open Settings") }
+        },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
 @Composable
 fun IncomingCallBanner(center: CallCenter, call: ActiveCall, modifier: Modifier = Modifier) {
+    val answer = rememberCallAction { center.answer() }
     Surface(modifier.padding(12.dp).fillMaxWidth(), shape = RoundedCornerShape(16.dp), tonalElevation = 6.dp, shadowElevation = 6.dp) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -81,7 +151,7 @@ fun IncomingCallBanner(center: CallCenter, call: ActiveCall, modifier: Modifier 
             }
             RoundButton(Icons.Filled.Close, "Decline", Color(0xFFDC2626)) { center.decline() }
             Spacer(Modifier.width(8.dp))
-            RoundButton(if (call.type == CallType.VIDEO) Icons.Filled.Videocam else Icons.Filled.Call, "Answer", Color(0xFF22C55E)) { center.answer() }
+            RoundButton(if (call.type == CallType.VIDEO) Icons.Filled.Videocam else Icons.Filled.Call, "Answer", Color(0xFF22C55E)) { answer(call.type) }
         }
     }
 }
@@ -105,14 +175,14 @@ fun CallScreen(center: CallCenter, state: CallState, call: ActiveCall) {
         }
         if (!state.remoteMicEnabled) {
             Row(
-                Modifier.align(Alignment.TopStart).padding(16.dp).clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.45f)).padding(horizontal = 10.dp, vertical = 5.dp),
+                Modifier.align(Alignment.TopStart).windowInsetsPadding(WindowInsets.statusBars).padding(16.dp).clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.45f)).padding(horizontal = 10.dp, vertical = 5.dp),
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 Icon(Icons.Filled.MicOff, "Their microphone is muted", Modifier.size(14.dp), tint = Color.White)
                 Text("Muted", color = Color.White, style = MaterialTheme.typography.labelSmall)
             }
         }
-        Text(status, Modifier.align(Alignment.TopCenter).padding(top = 28.dp), color = if (call.phase == CallPhase.RECONNECTING) Color.Yellow else Color.White.copy(alpha = 0.75f))
+        Text(status, Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.statusBars).padding(top = 16.dp), color = if (call.phase == CallPhase.RECONNECTING) Color.Yellow else Color.White.copy(alpha = 0.75f))
         // The renderer stays mounted (not conditionally) when the camera is off, so its track
         // assignment survives the toggle — only the overlay changes. Without this the box shows a
         // stale black frame instead of your own avatar when you turn your camera off mid-call.
@@ -144,8 +214,9 @@ fun CallScreen(center: CallCenter, state: CallState, call: ActiveCall) {
 fun CallButtons(center: CallCenter, conversation: Conversation) {
     val state by center.state.collectAsStateWithLifecycle()
     if (conversation.isGroup || conversation.peer == null) return
-    IconButton(onClick = { center.start(conversation, CallType.AUDIO) }, enabled = state.call == null) { Icon(Icons.Filled.Call, "Audio call") }
-    IconButton(onClick = { center.start(conversation, CallType.VIDEO) }, enabled = state.call == null) { Icon(Icons.Filled.Videocam, "Video call") }
+    val start = rememberCallAction { type -> center.start(conversation, type) }
+    IconButton(onClick = { start(CallType.AUDIO) }, enabled = state.call == null) { Icon(Icons.Filled.Call, "Audio call") }
+    IconButton(onClick = { start(CallType.VIDEO) }, enabled = state.call == null) { Icon(Icons.Filled.Videocam, "Video call") }
 }
 
 @Composable

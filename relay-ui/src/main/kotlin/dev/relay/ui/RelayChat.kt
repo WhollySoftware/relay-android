@@ -1,6 +1,7 @@
 package dev.relay.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -39,8 +41,15 @@ import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -155,6 +164,13 @@ fun MessageThread(client: RelayClient, conversationId: String, onBack: (() -> Un
     var replyTo by remember { mutableStateOf<Message?>(null) }
     var forwarding by remember { mutableStateOf<Message?>(null) }
     var scrolledInitiallyFor by remember { mutableStateOf<String?>(null) }
+    // Driven off scroll state rather than intercepting touch input, so it doesn't fight the
+    // message bubbles' own tap-to-reply/long-press gestures — only a real fling/drag hides the
+    // keyboard, not a plain tap on the list.
+    val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    LaunchedEffect(listState) {
+        androidx.compose.runtime.snapshotFlow { listState.isScrollInProgress }.collect { scrolling -> if (scrolling) keyboardController?.hide() }
+    }
     DisposableEffect(conversationId) {
         client.chat.setViewing(conversationId)
         scope.launch { runCatching { client.chat.loadMessages(conversationId) } }
@@ -180,9 +196,20 @@ fun MessageThread(client: RelayClient, conversationId: String, onBack: (() -> Un
         }
     }
 
-    Column(modifier.fillMaxSize()) {
+    // imePadding here (not on the LazyColumn/composer individually) is what keeps the header
+    // pinned: the header is a fixed-height first child, so when the keyboard eats into this
+    // Column's available height only the LazyColumn (weight(1f)) and composer below it shrink —
+    // without it the whole screen (header included) got pushed up by the OS's window resize.
+    Column(modifier.fillMaxSize().imePadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+            conversation?.let { c ->
+                Box {
+                    Avatar(name = c.title, url = if (c.isGroup) c.photoUrl else c.peer?.avatarUrl, size = 36.dp)
+                    if (!c.isGroup) c.peer?.isOnline?.let { PresenceDot(it, Modifier.align(Alignment.BottomEnd)) }
+                }
+                Spacer(Modifier.width(10.dp))
+            }
             Column(Modifier.weight(1f)) {
                 Text(conversation?.title ?: "", fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val sub = if (conversation?.isGroup == true) "${conversation.memberCount} members" else if (conversation?.peer?.isOnline == true) "Online" else "Offline"
@@ -204,7 +231,7 @@ fun MessageThread(client: RelayClient, conversationId: String, onBack: (() -> Un
                 MessageBubble(m, isOwn,
                     api = client.api,
                     senderName = if (conversation?.isGroup == true && !isOwn) conversation.members.firstOrNull { it.userId == m.senderId }?.displayName ?: m.senderId else null,
-                    status = if (isLastOwn && m.status != MessageStatus.SENDING && m.status != MessageStatus.FAILED) (if (seen) "Seen" else "Sent") else null,
+                    seen = if (isLastOwn && m.status != MessageStatus.SENDING && m.status != MessageStatus.FAILED) seen else null,
                     onRetry = { m.clientId?.let { cid -> scope.launch { runCatching { client.chat.retryMessage(conversationId, cid) } } } },
                     onDiscard = { m.clientId?.let { client.chat.discardMessage(conversationId, it) } },
                     onReply = { replyTo = m },
@@ -269,9 +296,64 @@ private fun ForwardPickerDialog(conversations: List<Conversation>, onDismiss: ()
     }
 }
 
+// Call summary lines are posted by the service as plain text ("📞 Video call · 0:30",
+// "📵 Video call cancelled", "📵 Missed call", "📵 Declined call") — a leading 📞 is a completed
+// call, 📵 is missed/declined/cancelled. Recognized here purely by that prefix so no protocol
+// change was needed to give them their own pill instead of a normal chat bubble.
+private fun callMessageInfo(body: String): Pair<String, Boolean>? = when {
+    body.startsWith("📞 ") -> body.removePrefix("📞 ") to false
+    body.startsWith("📵 ") -> body.removePrefix("📵 ") to true
+    else -> null
+}
+
+@Composable
+private fun CallMessageBubble(label: String, missed: Boolean, isVideo: Boolean, time: String, isOwn: Boolean) {
+    val tint = if (missed) Color(0xFFE53935) else Color(0xFF4CAF50)
+    Row(
+        Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(18.dp))
+            .border(1.dp, tint.copy(alpha = 0.5f), RoundedCornerShape(18.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(Modifier.size(34.dp).clip(RoundedCornerShape(999.dp)).background(tint), contentAlignment = Alignment.Center) {
+            Icon(
+                if (isVideo) Icons.Filled.Videocam else Icons.Filled.Call,
+                contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp),
+            )
+        }
+        Column {
+            Text(label, fontWeight = FontWeight.SemiBold)
+            Text(time, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** A voice-message bubble's play/pause + elapsed-or-duration row. */
+@Composable
+fun VoiceMessageRow(messageId: String, audioUrl: String, durationSec: Int?, tint: Color) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    val playing = ChatAudioPlayer.isPlaying(messageId)
+    val seconds = if (playing) ChatAudioPlayer.elapsedSeconds else (durationSec ?: 0)
+    DisposableEffect(messageId) { onDispose { if (ChatAudioPlayer.isPlaying(messageId)) ChatAudioPlayer.stop() } }
+    Row(
+        Modifier.clickable { ChatAudioPlayer.toggle(context, scope, messageId, audioUrl) }.padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (playing) "Pause" else "Play voice message", tint = tint)
+        Text("${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}", fontSize = 13.sp, color = tint)
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = null, senderName: String? = null, status: String? = null, onRetry: () -> Unit = {}, onDiscard: () -> Unit = {}, onReply: () -> Unit = {}, onDelete: (() -> Unit)? = null, onForward: ((Message) -> Unit)? = null) {
+fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = null, senderName: String? = null, seen: Boolean? = null, onRetry: () -> Unit = {}, onDiscard: () -> Unit = {}, onReply: () -> Unit = {}, onDelete: (() -> Unit)? = null, onForward: ((Message) -> Unit)? = null) {
+    callMessageInfo(m.body)?.let { (label, missed) ->
+        Column(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start) {
+            CallMessageBubble(label, missed, isVideo = label.contains("Video", ignoreCase = true), time = time(m.createdAt), isOwn = isOwn)
+        }
+        return
+    }
     Column(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start) {
         if (senderName != null) Text(senderName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 6.dp))
         val bg = if (isOwn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
@@ -292,7 +374,13 @@ fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = nu
             when {
                 m.deleted -> Text("This message was deleted", color = fg.copy(alpha = 0.7f))
                 else -> {
-                    m.imageUrl?.let { AsyncImage(model = it, contentDescription = null, modifier = Modifier.widthIn(max = 240.dp).clip(RoundedCornerShape(10.dp))) }
+                    m.imageUrl?.let {
+                        AsyncImage(
+                            model = it, contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            modifier = Modifier.width(220.dp).height(180.dp).clip(RoundedCornerShape(10.dp)),
+                        )
+                    }
+                    m.audioUrl?.let { url -> VoiceMessageRow(m.clientId ?: m.id, url, m.audioDurationSec, fg) }
                     m.fileUrl?.let { url ->
                         val context = androidx.compose.ui.platform.LocalContext.current
                         val openFile = { runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))) } }
@@ -375,8 +463,14 @@ fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = nu
             TextButton(onClick = onRetry) { Text("Retry") }
             TextButton(onClick = onDiscard) { Text("Discard") }
         }
-        if (status != null) Text(status, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(end = 6.dp))
-        if (onDelete != null && !m.deleted && !m.isPending && isOwn) TextButton(onClick = onDelete, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) { Text("Delete", style = MaterialTheme.typography.labelSmall) }
+        // WhatsApp-style receipt: single check = sent, double check = seen (green) — this SDK has
+        // no distinct "delivered" signal (only sent vs. read-receipt "seen"), so there's no gray
+        // double-check tier here.
+        if (seen != null) Icon(
+            if (seen) Icons.Filled.DoneAll else Icons.Filled.Done, contentDescription = if (seen) "Seen" else "Sent",
+            modifier = Modifier.padding(end = 6.dp).size(14.dp),
+            tint = if (seen) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -405,6 +499,7 @@ fun MessageComposer(client: RelayClient, conversationId: String, replyTo: Messag
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
     var cameraCaptureUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    val voiceRecorder = rememberVoiceRecorder()
 
     fun handlePick(block: suspend () -> Result<PickedAttachment>) {
         loadingAttachment = true
@@ -426,14 +521,66 @@ fun MessageComposer(client: RelayClient, conversationId: String, replyTo: Messag
         androidx.activity.result.contract.ActivityResultContracts.TakePicture(),
     ) { success -> val uri = cameraCaptureUri; if (success && uri != null) handlePick { loadCameraCapture(context, uri) } }
 
+    var showCameraSettingsPrompt by remember { mutableStateOf(false) }
     val cameraPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
-    ) { granted -> if (granted) { val uri = newCameraCaptureUri(context); cameraCaptureUri = uri; cameraLauncher.launch(uri) } else error = "Camera permission was denied." }
+    ) { granted ->
+        if (granted) { val uri = newCameraCaptureUri(context); cameraCaptureUri = uri; cameraLauncher.launch(uri) }
+        // No dialog is left to (re-)show once the system has already asked and been refused —
+        // the only way forward is the app's own permission screen in system Settings.
+        else showCameraSettingsPrompt = true
+    }
 
     fun launchCamera() {
         val granted = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
         if (granted) { val uri = newCameraCaptureUri(context); cameraCaptureUri = uri; cameraLauncher.launch(uri) }
         else cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+    }
+
+    var showMicSettingsPrompt by remember { mutableStateOf(false) }
+    val micPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted -> if (granted) voiceRecorder.start() else showMicSettingsPrompt = true }
+
+    fun startRecording() {
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) voiceRecorder.start() else micPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+    }
+
+    if (showMicSettingsPrompt) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showMicSettingsPrompt = false },
+            title = { Text("Permission needed") },
+            text = { Text("Microphone access was denied. Enable it in Settings to record a voice message.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showMicSettingsPrompt = false
+                    context.startActivity(
+                        android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", context.packageName, null))
+                            .apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) },
+                    )
+                }) { Text("Open Settings") }
+            },
+            dismissButton = { TextButton(onClick = { showMicSettingsPrompt = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (showCameraSettingsPrompt) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showCameraSettingsPrompt = false },
+            title = { Text("Permission needed") },
+            text = { Text("Camera access was denied. Enable it in Settings to take a photo.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showCameraSettingsPrompt = false
+                    context.startActivity(
+                        android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", context.packageName, null))
+                            .apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) },
+                    )
+                }) { Text("Open Settings") }
+            },
+            dismissButton = { TextButton(onClick = { showCameraSettingsPrompt = false }) { Text("Cancel") } },
+        )
     }
 
     fun send() {
@@ -448,6 +595,7 @@ fun MessageComposer(client: RelayClient, conversationId: String, replyTo: Messag
                     body = body.ifEmpty { null }, fileUrl = pending.dataUrl, fileName = pending.name,
                     fileThumbnailUrl = pending.thumbnail, fileDurationSec = pending.durationSec, replyToId = replyTo?.id,
                 )
+                is PickedAttachment.Audio -> dev.relay.core.SendMessageInput(body = body.ifEmpty { null }, audioUrl = pending.dataUrl, audioDurationSec = pending.durationSec, replyToId = replyTo?.id)
                 null -> dev.relay.core.SendMessageInput(body = body, replyToId = replyTo?.id)
             }
             try { client.chat.sendMessage(conversationId, input); onCancelReply() }
@@ -465,6 +613,10 @@ fun MessageComposer(client: RelayClient, conversationId: String, replyTo: Messag
                         if (a.thumbnail != null) AsyncImage(model = a.thumbnail, contentDescription = null, modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
                         else Icon(if (a.mime.startsWith("video/")) Icons.Filled.PlayArrow else Icons.Filled.AttachFile, null, Modifier.size(44.dp))
                         Text(a.name, Modifier.weight(1f).padding(start = 6.dp), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    is PickedAttachment.Audio -> {
+                        Icon(Icons.Filled.Mic, null, Modifier.size(28.dp))
+                        Text("Voice message · ${a.durationSec / 60}:${(a.durationSec % 60).toString().padStart(2, '0')}", Modifier.weight(1f).padding(start = 6.dp), style = MaterialTheme.typography.labelSmall)
                     }
                 }
                 TextButton(onClick = { attachment = null }) { Text("✕") }
@@ -486,8 +638,22 @@ fun MessageComposer(client: RelayClient, conversationId: String, replyTo: Messag
                     androidx.compose.material3.DropdownMenuItem(text = { Text("File") }, onClick = { showAttachMenu = false; fileLauncher.launch("*/*") })
                 }
             }
-            OutlinedTextField(value = text, onValueChange = { text = it; if (it.isNotBlank()) client.chat.sendTyping(conversationId) }, modifier = Modifier.weight(1f), placeholder = { Text("Message…") }, maxLines = 5, shape = RoundedCornerShape(20.dp))
-            IconButton(onClick = { send() }, enabled = text.isNotBlank() || attachment != null) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = if (text.isNotBlank() || attachment != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
+            if (voiceRecorder.isRecording) {
+                Row(Modifier.weight(1f).padding(horizontal = 8.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Mic, "Recording", tint = MaterialTheme.colorScheme.error)
+                    Text(" ${voiceRecorder.elapsedSeconds / 60}:${(voiceRecorder.elapsedSeconds % 60).toString().padStart(2, '0')}", Modifier.weight(1f))
+                    TextButton(onClick = { voiceRecorder.cancel() }) { Text("Cancel") }
+                }
+            } else {
+                OutlinedTextField(value = text, onValueChange = { text = it; if (it.isNotBlank()) client.chat.sendTyping(conversationId) }, modifier = Modifier.weight(1f), placeholder = { Text("Message…") }, maxLines = 5, shape = RoundedCornerShape(20.dp))
+            }
+            if (voiceRecorder.isRecording) {
+                IconButton(onClick = { voiceRecorder.finish()?.let { attachment = it } }) { Icon(Icons.Filled.Stop, "Stop recording", tint = MaterialTheme.colorScheme.error) }
+            } else if (text.isBlank() && attachment == null) {
+                IconButton(onClick = { startRecording() }) { Icon(Icons.Filled.Mic, "Record voice message") }
+            } else {
+                IconButton(onClick = { send() }, enabled = text.isNotBlank() || attachment != null) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = MaterialTheme.colorScheme.primary) }
+            }
         }
     }
 }

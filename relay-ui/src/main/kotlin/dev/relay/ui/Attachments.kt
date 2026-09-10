@@ -21,6 +21,7 @@ private const val MAX_ATTACHMENT_BYTES = 9_500_000L // leaves room under the ser
 sealed class PickedAttachment {
     data class Image(val dataUrl: String) : PickedAttachment()
     data class FileAttachment(val dataUrl: String, val name: String, val mime: String, val thumbnail: String?, val durationSec: Int?) : PickedAttachment()
+    data class Audio(val dataUrl: String, val durationSec: Int) : PickedAttachment()
 }
 
 private fun bytesToDataUrl(bytes: ByteArray, mime: String) = "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
