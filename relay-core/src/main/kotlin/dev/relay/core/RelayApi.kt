@@ -112,6 +112,14 @@ class RelayApi(private val config: RelayConfig, internal val tokens: TokenSource
     suspend fun markRead(id: String): ReadResult = request("POST", "/conversations/$id/read", serializer = ReadResult.serializer())
     suspend fun readReceipts(id: String): List<ReadReceipt> = request("GET", "/conversations/$id/read-receipts", serializer = ReceiptsEnv.serializer()).receipts
 
+    @Serializable private data class LinkPreviewEnv(val preview: LinkPreview? = null)
+
+    /** OG metadata for a URL found in a message body, for a WhatsApp-style preview card. Server-
+     *  cached, so calling this repeatedly for the same URL across viewers is cheap. Returns null
+     *  when the page has nothing usable (or is unreachable / not HTML / a private address). */
+    suspend fun linkPreview(url: String): LinkPreview? =
+        request("GET", "/link-preview?url=${enc(url)}", serializer = LinkPreviewEnv.serializer()).preview
+
     /** Tell peers you're going offline now (call from onStop alongside disconnect()). */
     suspend fun goOffline() { request("POST", "/presence/offline", serializer = OkResult.serializer()) }
 

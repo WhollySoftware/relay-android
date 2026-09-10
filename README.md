@@ -38,6 +38,29 @@ if the project has an Android package allowlist configured (in the admin panel o
 service rejects requests from an app not on that list. Optional and backward compatible: omit it,
 or leave the project's allowlist empty, and nothing is enforced.
 
+## Attachments
+
+`MessageComposer`'s attach button (Camera / Gallery / File) covers images, video and generic
+files. Gallery (`PickVisualMedia`, Android's system Photo Picker) and File (`GetContent`) need
+**no permission at all** — both are out-of-process pickers, so this SDK never gets broader
+media/storage access than the one item the user picked, on any API level. **Camera is the one
+exception**: add `<uses-permission android:name="android.permission.CAMERA"/>` to your own
+`AndroidManifest.xml` — `MessageComposer` requests it at runtime the first time Camera is tapped.
+Deliberately not bundled into `relay-ui`'s own manifest, so a chat-only app that never uses the
+camera isn't forced to carry that permission. (The `FileProvider` Camera needs to hand off its
+capture *is* bundled in `relay-ui`'s manifest and merges into yours automatically — that's pure
+plumbing, not a user-facing permission.) A video pick/capture gets a small client-extracted
+thumbnail automatically; this SDK never decodes video server-side either.
+
+## Link previews
+
+A message whose body contains an `http(s)://` URL automatically gets a social-app-style preview
+card (image, title, description, site name) under the bubble — and the same card appears above
+`MessageComposer`'s text field, live, the moment a link is typed or pasted into the draft, before
+it's even sent. No setup needed: the metadata is fetched and cached server-side (`GET
+/link-preview`), so this composable never talks to the linked site directly. A link with no usable
+Open Graph metadata (or that fails to load) renders no card at all — never an empty placeholder.
+
 ## Calling
 
 ```kotlin

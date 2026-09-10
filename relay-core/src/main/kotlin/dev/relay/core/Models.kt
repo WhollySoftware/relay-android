@@ -55,6 +55,15 @@ data class Message(
     val imageUrl: String? = null,
     val audioUrl: String? = null,
     val audioDurationSec: Int? = null,
+    /** A generic attachment (document, video, anything from a file picker) — mutually exclusive with imageUrl/audioUrl. */
+    val fileUrl: String? = null,
+    val fileName: String? = null,
+    /** Inferred server-side for a data: fileUrl; null for an http(s) one unless the sender declared it. */
+    val fileMime: String? = null,
+    val fileSizeBytes: Long? = null,
+    /** A client-extracted preview frame — only ever set for a video fileUrl. */
+    val fileThumbnailUrl: String? = null,
+    val fileDurationSec: Int? = null,
     val replyTo: ReplyPreview? = null,
     /** Client-generated id for optimistic sends; echoed by the server. */
     val clientId: String? = null,
@@ -63,6 +72,7 @@ data class Message(
     @kotlinx.serialization.Transient val error: String? = null,
 ) {
     val isPending: Boolean get() = status == MessageStatus.SENDING || status == MessageStatus.FAILED
+    val isVideo: Boolean get() = fileUrl != null && (fileMime ?: "").startsWith("video/")
 }
 
 @Serializable
@@ -71,6 +81,14 @@ data class SendMessageInput(
     val imageUrl: String? = null,
     val audioUrl: String? = null,
     val audioDurationSec: Int? = null,
+    /** A generic attachment — http(s) URL, or a data URL under 14MB. Requires fileName. */
+    val fileUrl: String? = null,
+    val fileName: String? = null,
+    /** Only used for an http(s) fileUrl — a data: fileUrl's size is computed server-side. */
+    val fileSizeBytes: Long? = null,
+    /** A client-extracted preview frame for a video fileUrl — http(s) URL, or an image data URL under 400KB. */
+    val fileThumbnailUrl: String? = null,
+    val fileDurationSec: Int? = null,
     val replyToId: String? = null,
     val clientId: String? = null,
 )
@@ -83,6 +101,18 @@ data class ReadReceipt(val userId: String, val lastReadAt: String? = null)
 
 @Serializable
 data class MessagesPage(val messages: List<Message>, val hasMore: Boolean)
+
+/** Open Graph metadata for a URL found in a message — enough to render a WhatsApp/social-app-style
+ *  preview card under the bubble. Fetched server-side via RelayApi.linkPreview; null fields mean
+ *  the page didn't declare that piece of metadata. */
+@Serializable
+data class LinkPreview(
+    val url: String,
+    val title: String? = null,
+    val description: String? = null,
+    val imageUrl: String? = null,
+    val siteName: String? = null,
+)
 
 data class PresenceInfo(val online: Boolean, val lastSeenAt: String?)
 

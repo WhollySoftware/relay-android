@@ -1,7 +1,9 @@
 package dev.relay.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -31,7 +34,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Forward
+import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
@@ -60,6 +70,11 @@ import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+
+// --------------------------------------------------------------------------------------------
+// (MessageComposer's attachment picking lives in Attachments.kt — PickedAttachment,
+// loadPickedMedia, loadPickedFile, newCameraCaptureUri, loadCameraCapture)
+// --------------------------------------------------------------------------------------------
 
 /**
  * The whole chat UI: list → thread → composer, with a connection banner. Drop it in a screen:
@@ -138,12 +153,32 @@ fun MessageThread(client: RelayClient, conversationId: String, onBack: (() -> Un
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     var replyTo by remember { mutableStateOf<Message?>(null) }
+    var forwarding by remember { mutableStateOf<Message?>(null) }
+    var scrolledInitiallyFor by remember { mutableStateOf<String?>(null) }
     DisposableEffect(conversationId) {
         client.chat.setViewing(conversationId)
         scope.launch { runCatching { client.chat.loadMessages(conversationId) } }
         onDispose { if (client.chat.viewingConversationId == conversationId) client.chat.setViewing(null) }
     }
-    LaunchedEffect(thread.messages.lastOrNull()?.id) { if (thread.messages.isNotEmpty()) listState.animateScrollToItem(thread.messages.size) }
+    // Index of the last real row — accounts for the conditional "Load earlier messages" item at
+    // index 0 (below) so this lands on the actual last message, not one row short.
+    val lastItemIndex = (if (thread.hasMore) 1 else 0) + thread.messages.size - 1
+    // First time this conversation's messages arrive, jump straight to the bottom with no
+    // animation — an animated scroll here raced LazyColumn's very first layout pass often enough
+    // to visibly under-scroll, leaving the thread opening on older messages instead of the latest.
+    LaunchedEffect(conversationId, thread.messages.isNotEmpty()) {
+        if (thread.messages.isNotEmpty() && scrolledInitiallyFor != conversationId) {
+            listState.scrollToItem(lastItemIndex)
+            scrolledInitiallyFor = conversationId
+        }
+    }
+    // Every later arrival (a new message while already viewing) animates instead, since by then
+    // the list is already laid out and the animation reads as a natural "new message" nudge.
+    LaunchedEffect(thread.messages.lastOrNull()?.id) {
+        if (scrolledInitiallyFor == conversationId && thread.messages.isNotEmpty()) {
+            listState.animateScrollToItem(lastItemIndex)
+        }
+    }
 
     Column(modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -167,12 +202,14 @@ fun MessageThread(client: RelayClient, conversationId: String, onBack: (() -> Un
                 val isLastOwn = isOwn && thread.messages.drop(i + 1).none { it.senderId == client.userId }
                 val seen = receipts.any { (u, at) -> u != client.userId && at != null && at >= m.createdAt }
                 MessageBubble(m, isOwn,
+                    api = client.api,
                     senderName = if (conversation?.isGroup == true && !isOwn) conversation.members.firstOrNull { it.userId == m.senderId }?.displayName ?: m.senderId else null,
                     status = if (isLastOwn && m.status != MessageStatus.SENDING && m.status != MessageStatus.FAILED) (if (seen) "Seen" else "Sent") else null,
                     onRetry = { m.clientId?.let { cid -> scope.launch { runCatching { client.chat.retryMessage(conversationId, cid) } } } },
                     onDiscard = { m.clientId?.let { client.chat.discardMessage(conversationId, it) } },
                     onReply = { replyTo = m },
-                    onDelete = if (isOwn) ({ scope.launch { runCatching { client.chat.deleteMessage(conversationId, m.id) } } }) else null)
+                    onDelete = if (isOwn) ({ scope.launch { runCatching { client.chat.deleteMessage(conversationId, m.id) } } }) else null,
+                    onForward = { forwarding = m })
             }
         }
         val typing = state.typing[conversationId].orEmpty()
@@ -180,27 +217,157 @@ fun MessageThread(client: RelayClient, conversationId: String, onBack: (() -> Un
             Modifier.padding(horizontal = 14.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         MessageComposer(client, conversationId, replyTo = replyTo, onCancelReply = { replyTo = null })
     }
+    forwarding?.let { m ->
+        ForwardPickerDialog(
+            conversations = state.conversations.filter { it.id != conversationId },
+            onDismiss = { forwarding = null },
+            onPick = { targetId ->
+                forwarding = null
+                scope.launch {
+                    runCatching {
+                        client.chat.sendMessage(
+                            targetId,
+                            dev.relay.core.SendMessageInput(
+                                body = m.body.ifEmpty { null }, imageUrl = m.imageUrl, audioUrl = m.audioUrl, audioDurationSec = m.audioDurationSec,
+                                fileUrl = m.fileUrl, fileName = m.fileName, fileSizeBytes = m.fileSizeBytes,
+                                fileThumbnailUrl = m.fileThumbnailUrl, fileDurationSec = m.fileDurationSec,
+                            ),
+                        )
+                    }
+                }
+            },
+        )
+    }
 }
 
+/** Simple conversation picker for "Forward" — every other conversation the user is already in.
+ *  No new-conversation flow here; forwarding to someone you haven't messaged yet is just opening
+ *  that chat and pasting, same as most chat apps' plain forward-to-existing-chat picker. */
 @Composable
-fun MessageBubble(m: Message, isOwn: Boolean, senderName: String? = null, status: String? = null, onRetry: () -> Unit = {}, onDiscard: () -> Unit = {}, onReply: () -> Unit = {}, onDelete: (() -> Unit)? = null) {
+private fun ForwardPickerDialog(conversations: List<Conversation>, onDismiss: () -> Unit, onPick: (String) -> Unit) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp).clip(RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.surface).padding(vertical = 8.dp),
+        ) {
+            Text("Forward to…", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            if (conversations.isEmpty()) {
+                Text("No other conversations yet.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(16.dp))
+            }
+            LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                items(conversations, key = { it.id }) { c ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { onPick(c.id) }.padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Avatar(c.title, if (c.isGroup) c.photoUrl else c.peer?.avatarUrl, size = 36.dp)
+                        Text(c.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = null, senderName: String? = null, status: String? = null, onRetry: () -> Unit = {}, onDiscard: () -> Unit = {}, onReply: () -> Unit = {}, onDelete: (() -> Unit)? = null, onForward: ((Message) -> Unit)? = null) {
     Column(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start) {
         if (senderName != null) Text(senderName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 6.dp))
         val bg = if (isOwn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
         val fg = if (isOwn) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-        Column(Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(18.dp)).background(bg).clickable(enabled = !m.deleted && !m.isPending, onClick = onReply).padding(horizontal = 12.dp, vertical = 8.dp)) {
+        var showActions by remember { mutableStateOf(false) }
+        val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+        Box {
+            Column(
+                Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(18.dp)).background(bg)
+                    .combinedClickable(
+                        enabled = !m.deleted && !m.isPending,
+                        onClick = onReply,
+                        onLongClick = { showActions = true },
+                    )
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
             m.replyTo?.let { r -> Text((if (r.deleted) "Message deleted" else r.body.ifEmpty { "Attachment" }), style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.8f), maxLines = 2) }
             when {
                 m.deleted -> Text("This message was deleted", color = fg.copy(alpha = 0.7f))
                 else -> {
                     m.imageUrl?.let { AsyncImage(model = it, contentDescription = null, modifier = Modifier.widthIn(max = 240.dp).clip(RoundedCornerShape(10.dp))) }
+                    m.fileUrl?.let { url ->
+                        val context = androidx.compose.ui.platform.LocalContext.current
+                        val openFile = { runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))) } }
+                        if (m.isVideo) {
+                            Box(
+                                Modifier.width(220.dp).height(140.dp).clip(RoundedCornerShape(10.dp))
+                                    .background(Color.Black.copy(alpha = 0.3f)).clickable { openFile() },
+                            ) {
+                                m.fileThumbnailUrl?.let { AsyncImage(model = it, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
+                                Icon(Icons.Filled.PlayArrow, "Play video", Modifier.align(Alignment.Center).size(40.dp), tint = Color.White)
+                                m.fileDurationSec?.let { sec ->
+                                    Text(
+                                        "${sec / 60}:${(sec % 60).toString().padStart(2, '0')}", fontSize = 10.sp, color = Color.White,
+                                        modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp).background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(999.dp)).padding(horizontal = 6.dp, vertical = 1.dp),
+                                    )
+                                }
+                            }
+                        } else {
+                            Row(
+                                Modifier.clip(RoundedCornerShape(10.dp)).clickable { openFile() }.padding(6.dp),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Icon(Icons.Filled.AttachFile, "File", tint = fg)
+                                Column {
+                                    Text(m.fileName ?: "File", fontSize = 13.sp, color = fg, maxLines = 1)
+                                    m.fileSizeBytes?.let { Text(formatFileSize(it), fontSize = 10.sp, color = fg.copy(alpha = 0.7f)) }
+                                }
+                            }
+                        }
+                    }
                     if (m.body.isNotEmpty()) Text(m.body, color = fg)
+                    if (api != null && !m.isPending) firstUrl(m.body)?.let { url -> LinkPreviewCard(api, url, isOwn, fg) }
                 }
             }
             Row(Modifier.align(Alignment.End), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (m.editedAt != null && !m.deleted) Text("edited", fontSize = 10.sp, color = fg.copy(alpha = 0.7f))
                 Text(time(m.createdAt), fontSize = 10.sp, color = fg.copy(alpha = 0.7f))
                 if (m.status == MessageStatus.SENDING) Text("⏱", fontSize = 10.sp, color = fg.copy(alpha = 0.7f))
+            }
+            }
+            androidx.compose.material3.DropdownMenu(expanded = showActions, onDismissRequest = { showActions = false }) {
+                if (!m.deleted && (m.body.isNotEmpty() || m.fileName != null)) {
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Copy") },
+                        onClick = {
+                            showActions = false
+                            clipboard.setText(androidx.compose.ui.text.AnnotatedString(m.body.ifEmpty { m.fileName.orEmpty() }))
+                        },
+                        leadingIcon = { Icon(Icons.Filled.ContentCopy, null) },
+                    )
+                }
+                if (!m.deleted && !m.isPending) {
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Reply") }, onClick = { showActions = false; onReply() }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Reply, null) })
+                }
+                if (onForward != null && !m.deleted && !m.isPending) {
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Forward") }, onClick = { showActions = false; onForward(m) }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Forward, null) })
+                }
+                if (!m.deleted && !m.isPending) {
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Share") },
+                        onClick = {
+                            showActions = false
+                            val shareText = m.body.ifEmpty { m.fileUrl ?: m.imageUrl ?: m.audioUrl ?: "" }
+                            if (shareText.isNotEmpty()) {
+                                val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(android.content.Intent.EXTRA_TEXT, shareText) }
+                                context.startActivity(android.content.Intent.createChooser(send, null))
+                            }
+                        },
+                        leadingIcon = { Icon(Icons.Filled.Share, null) },
+                    )
+                }
+                if (onDelete != null && !m.deleted && !m.isPending && isOwn) {
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Delete") }, onClick = { showActions = false; onDelete() }, leadingIcon = { Icon(Icons.Filled.Delete, null) })
+                }
             }
         }
         if (m.status == MessageStatus.FAILED) Row(verticalAlignment = Alignment.CenterVertically) {
@@ -213,25 +380,114 @@ fun MessageBubble(m: Message, isOwn: Boolean, senderName: String? = null, status
     }
 }
 
+/**
+ * Text field + send button, plus an attach menu (Camera / Gallery / File) mirroring DevBattel's
+ * chat composer.
+ *
+ * Permissions: gallery (`PickVisualMedia`, Android's system Photo Picker) and file
+ * (`GetContent`) need NOTHING — both are out-of-process pickers, this code never gets broader
+ * media/storage access than the one item the user picked, on any API level. Only **Camera**
+ * needs anything from the host app: add `<uses-permission android:name="android.permission.CAMERA"/>`
+ * to its own manifest and this composable requests it at runtime the first time Camera is
+ * tapped — deliberately not declared in relay-ui's own manifest, so a chat-only app that never
+ * uses the camera isn't forced to carry that permission. (The FileProvider Camera needs to write
+ * its capture into IS bundled in relay-ui's manifest already — that's plumbing, not a
+ * user-facing permission, see its own doc comment.)
+ */
 @Composable
 fun MessageComposer(client: RelayClient, conversationId: String, replyTo: Message? = null, onCancelReply: () -> Unit = {}) {
     var text by rememberSaveable(conversationId) { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    var attachment by remember { mutableStateOf<PickedAttachment?>(null) }
+    var loadingAttachment by remember { mutableStateOf(false) }
+    var showAttachMenu by remember { mutableStateOf(false) }
+    var dismissedPreviewUrl by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    fun send() {
-        val body = text.trim(); if (body.isEmpty()) return
-        text = ""; error = null
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var cameraCaptureUri by remember { mutableStateOf<android.net.Uri?>(null) }
+
+    fun handlePick(block: suspend () -> Result<PickedAttachment>) {
+        loadingAttachment = true
         scope.launch {
-            try { client.chat.sendMessage(conversationId, dev.relay.core.SendMessageInput(body = body, replyToId = replyTo?.id)); onCancelReply() }
-            catch (e: Exception) { error = e.message }
+            block().onSuccess { attachment = it }.onFailure { error = it.message }
+            loadingAttachment = false
         }
     }
+
+    val galleryLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> if (uri != null) handlePick { loadPickedMedia(context, uri) } }
+
+    val fileLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetContent(),
+    ) { uri -> if (uri != null) handlePick { loadPickedFile(context, uri) } }
+
+    val cameraLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.TakePicture(),
+    ) { success -> val uri = cameraCaptureUri; if (success && uri != null) handlePick { loadCameraCapture(context, uri) } }
+
+    val cameraPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted -> if (granted) { val uri = newCameraCaptureUri(context); cameraCaptureUri = uri; cameraLauncher.launch(uri) } else error = "Camera permission was denied." }
+
+    fun launchCamera() {
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) { val uri = newCameraCaptureUri(context); cameraCaptureUri = uri; cameraLauncher.launch(uri) }
+        else cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+    }
+
+    fun send() {
+        val body = text.trim()
+        val pending = attachment
+        if (body.isEmpty() && pending == null) return
+        text = ""; error = null; attachment = null; dismissedPreviewUrl = null
+        scope.launch {
+            val input = when (pending) {
+                is PickedAttachment.Image -> dev.relay.core.SendMessageInput(body = body.ifEmpty { null }, imageUrl = pending.dataUrl, replyToId = replyTo?.id)
+                is PickedAttachment.FileAttachment -> dev.relay.core.SendMessageInput(
+                    body = body.ifEmpty { null }, fileUrl = pending.dataUrl, fileName = pending.name,
+                    fileThumbnailUrl = pending.thumbnail, fileDurationSec = pending.durationSec, replyToId = replyTo?.id,
+                )
+                null -> dev.relay.core.SendMessageInput(body = body, replyToId = replyTo?.id)
+            }
+            try { client.chat.sendMessage(conversationId, input); onCancelReply() }
+            catch (e: Exception) { error = e.message; attachment = pending }
+        }
+    }
+
     Column(Modifier.fillMaxWidth().padding(8.dp)) {
         replyTo?.let { r -> Row(verticalAlignment = Alignment.CenterVertically) { Text("Replying: ${if (r.deleted) "Message deleted" else r.body.ifEmpty { "Attachment" }}", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis); TextButton(onClick = onCancelReply) { Text("✕") } } }
+        attachment?.let { a ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 4.dp)) {
+                when (a) {
+                    is PickedAttachment.Image -> AsyncImage(model = a.dataUrl, contentDescription = null, modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
+                    is PickedAttachment.FileAttachment -> {
+                        if (a.thumbnail != null) AsyncImage(model = a.thumbnail, contentDescription = null, modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
+                        else Icon(if (a.mime.startsWith("video/")) Icons.Filled.PlayArrow else Icons.Filled.AttachFile, null, Modifier.size(44.dp))
+                        Text(a.name, Modifier.weight(1f).padding(start = 6.dp), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                TextButton(onClick = { attachment = null }) { Text("✕") }
+            }
+        }
+        if (loadingAttachment) Row(verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp); Text(" Preparing attachment…", style = MaterialTheme.typography.labelSmall) }
+        if (attachment == null) {
+            firstUrl(text)?.takeIf { it != dismissedPreviewUrl }?.let { url ->
+                Box(Modifier.padding(bottom = 4.dp)) { ComposeLinkPreviewCard(client.api, url) { dismissedPreviewUrl = url } }
+            }
+        }
         error?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
         Row(verticalAlignment = Alignment.Bottom) {
+            Box {
+                IconButton(onClick = { showAttachMenu = true }) { Icon(Icons.Filled.AttachFile, "Attach") }
+                androidx.compose.material3.DropdownMenu(expanded = showAttachMenu, onDismissRequest = { showAttachMenu = false }) {
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Camera") }, onClick = { showAttachMenu = false; launchCamera() })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Gallery") }, onClick = { showAttachMenu = false; galleryLauncher.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageAndVideo)) })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("File") }, onClick = { showAttachMenu = false; fileLauncher.launch("*/*") })
+                }
+            }
             OutlinedTextField(value = text, onValueChange = { text = it; if (it.isNotBlank()) client.chat.sendTyping(conversationId) }, modifier = Modifier.weight(1f), placeholder = { Text("Message…") }, maxLines = 5, shape = RoundedCornerShape(20.dp))
-            IconButton(onClick = { send() }, enabled = text.isNotBlank()) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = if (text.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
+            IconButton(onClick = { send() }, enabled = text.isNotBlank() || attachment != null) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = if (text.isNotBlank() || attachment != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 }
@@ -264,4 +520,9 @@ fun day(iso: String): String {
     val t = parse(iso) ?: return ""
     val d = t.atZone(ZoneId.systemDefault()).toLocalDate(); val today = java.time.LocalDate.now()
     return when (d) { today -> "Today"; today.minusDays(1) -> "Yesterday"; else -> DateTimeFormatter.ofPattern("MMM d").format(d) }
+}
+fun formatFileSize(bytes: Long): String = when {
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+    else -> String.format("%.1f MB", bytes / (1024.0 * 1024.0))
 }

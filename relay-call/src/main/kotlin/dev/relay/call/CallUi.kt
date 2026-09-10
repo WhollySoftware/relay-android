@@ -38,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -93,14 +94,42 @@ fun CallScreen(center: CallCenter, state: CallState, call: ActiveCall) {
         CallPhase.OUTGOING -> "Calling…"; CallPhase.CONNECTING -> "Connecting…"; CallPhase.RECONNECTING -> "Reconnecting…"
         else -> call.startedAtMs?.let { val s = ((now - it) / 1000).coerceAtLeast(0); "%02d:%02d".format(s / 60, s % 60) } ?: ""
     }
+    // A disabled remote camera still sends frames (all black), so remoteCameraEnabled — not just
+    // "is there a remote track" — decides whether to show video or fall back to the avatar.
+    val showRemoteVideo = call.type == CallType.VIDEO && state.remoteVideoTrack != null && state.remoteCameraEnabled
     Box(Modifier.fillMaxSize().background(Color(0xFF12182A))) {
-        if (call.type == CallType.VIDEO && state.remoteVideoTrack != null) VideoView(state.remoteVideoTrack, Modifier.fillMaxSize())
+        if (showRemoteVideo) VideoView(state.remoteVideoTrack!!, Modifier.fillMaxSize())
         else Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
             Box(Modifier.size(112.dp).clip(CircleShape).background(Color.Gray.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) { Text((call.peerName ?: call.peerId).take(2).uppercase(), color = Color.White, style = MaterialTheme.typography.headlineMedium) }
             Spacer(Modifier.height(12.dp)); Text(call.peerName ?: call.peerId, color = Color.White, style = MaterialTheme.typography.titleLarge)
         }
+        if (!state.remoteMicEnabled) {
+            Row(
+                Modifier.align(Alignment.TopStart).padding(16.dp).clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.45f)).padding(horizontal = 10.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Icon(Icons.Filled.MicOff, "Their microphone is muted", Modifier.size(14.dp), tint = Color.White)
+                Text("Muted", color = Color.White, style = MaterialTheme.typography.labelSmall)
+            }
+        }
         Text(status, Modifier.align(Alignment.TopCenter).padding(top = 28.dp), color = if (call.phase == CallPhase.RECONNECTING) Color.Yellow else Color.White.copy(alpha = 0.75f))
-        if (call.type == CallType.VIDEO) state.localVideoTrack?.let { VideoView(it, Modifier.align(Alignment.BottomEnd).padding(16.dp, 0.dp, 16.dp, 120.dp).size(100.dp, 150.dp).clip(RoundedCornerShape(14.dp)), mirror = true) }
+        // The renderer stays mounted (not conditionally) when the camera is off, so its track
+        // assignment survives the toggle — only the overlay changes. Without this the box shows a
+        // stale black frame instead of your own avatar when you turn your camera off mid-call.
+        if (call.type == CallType.VIDEO) state.localVideoTrack?.let { track ->
+            Box(Modifier.align(Alignment.BottomEnd).padding(16.dp, 0.dp, 16.dp, 120.dp).size(100.dp, 150.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF1D2540))) {
+                VideoView(track, Modifier.fillMaxSize().alpha(if (state.cameraEnabled) 1f else 0f), mirror = true)
+                if (!state.cameraEnabled) {
+                    Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Box(Modifier.size(36.dp).clip(CircleShape).background(Color.Gray.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
+                            Text((center.myDisplayName ?: "You").take(2).uppercase(), color = Color.White, style = MaterialTheme.typography.labelSmall)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(center.myDisplayName ?: "You", color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                    }
+                }
+            }
+        }
         Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
             RoundButton(if (state.micEnabled) Icons.Filled.Mic else Icons.Filled.MicOff, "Mute", if (state.micEnabled) Color.White.copy(alpha = 0.2f) else Color.White, if (state.micEnabled) Color.White else Color.Black) { center.toggleMic() }
             if (call.type == CallType.VIDEO) RoundButton(if (state.cameraEnabled) Icons.Filled.Videocam else Icons.Filled.VideocamOff, "Camera", if (state.cameraEnabled) Color.White.copy(alpha = 0.2f) else Color.White, if (state.cameraEnabled) Color.White else Color.Black) { center.toggleCamera() }

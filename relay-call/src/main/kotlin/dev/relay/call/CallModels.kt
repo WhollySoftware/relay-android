@@ -4,6 +4,7 @@ import dev.relay.core.RelayApi
 import dev.relay.core.RelayJson
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -32,6 +33,9 @@ sealed class CallEvent {
     data class Offer(val callId: String, val sdp: SdpPayload) : CallEvent()
     data class AnswerSdp(val callId: String, val sdp: SdpPayload) : CallEvent()
     data class Ice(val callId: String, val candidate: IceCandidatePayload) : CallEvent()
+    // Only the field that changed is present — the other is null, not false. See CallCenter's
+    // handle() for why each side must be applied independently.
+    data class MediaState(val callId: String, val cameraEnabled: Boolean?, val micEnabled: Boolean?) : CallEvent()
 
     companion object {
         fun decode(event: String, o: JsonObject): CallEvent? {
@@ -49,6 +53,7 @@ sealed class CallEvent {
                     val c = o["candidate"]?.jsonObject ?: return null
                     Ice(s("callId") ?: return null, IceCandidatePayload(c["candidate"]?.jsonPrimitive?.contentOrNull ?: return null, c["sdpMid"]?.jsonPrimitive?.contentOrNull, c["sdpMLineIndex"]?.jsonPrimitive?.intOrNull))
                 }
+                "call_media_state" -> MediaState(s("callId") ?: return null, o["cameraEnabled"]?.jsonPrimitive?.booleanOrNull, o["micEnabled"]?.jsonPrimitive?.booleanOrNull)
                 else -> null
             }
         }

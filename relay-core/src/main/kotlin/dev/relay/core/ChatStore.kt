@@ -186,7 +186,10 @@ class ChatStore internal constructor(private val api: RelayApi, private val sock
         val optimistic = Message(
             id = "pending:$clientId", conversationId = id, senderId = meId ?: "", body = input.body ?: "",
             createdAt = java.time.Instant.now().toString(), imageUrl = input.imageUrl, audioUrl = input.audioUrl,
-            audioDurationSec = input.audioDurationSec, replyTo = replyTarget?.let { ReplyPreview(it.id, it.senderId, it.body, it.deleted) },
+            audioDurationSec = input.audioDurationSec,
+            fileUrl = input.fileUrl, fileName = input.fileName, fileSizeBytes = input.fileSizeBytes,
+            fileThumbnailUrl = input.fileThumbnailUrl, fileDurationSec = input.fileDurationSec,
+            replyTo = replyTarget?.let { ReplyPreview(it.id, it.senderId, it.body, it.deleted) },
             clientId = clientId, status = MessageStatus.SENDING,
         )
         setThread(id) { it.copy(messages = merge(it.messages, listOf(optimistic))) }
@@ -204,7 +207,12 @@ class ChatStore internal constructor(private val api: RelayApi, private val sock
         val failed = snapshot.thread(id).messages.firstOrNull { it.clientId == clientId && it.status == MessageStatus.FAILED }
             ?: throw IllegalArgumentException("No failed message with clientId $clientId")
         setThread(id) { t -> t.copy(messages = t.messages.filter { it.clientId != clientId }) }
-        return sendMessage(id, SendMessageInput(failed.body.ifEmpty { null }, failed.imageUrl, failed.audioUrl, failed.audioDurationSec, failed.replyTo?.id, clientId))
+        return sendMessage(id, SendMessageInput(
+            body = failed.body.ifEmpty { null }, imageUrl = failed.imageUrl, audioUrl = failed.audioUrl, audioDurationSec = failed.audioDurationSec,
+            fileUrl = failed.fileUrl, fileName = failed.fileName, fileSizeBytes = failed.fileSizeBytes,
+            fileThumbnailUrl = failed.fileThumbnailUrl, fileDurationSec = failed.fileDurationSec,
+            replyToId = failed.replyTo?.id, clientId = clientId,
+        ))
     }
 
     fun discardMessage(id: String, clientId: String) = setThread(id) { t -> t.copy(messages = t.messages.filter { it.clientId != clientId }) }
@@ -241,8 +249,18 @@ class ChatStore internal constructor(private val api: RelayApi, private val sock
         patch(id) { it.copy(lastMessage = preview(m), lastMessageAt = m.createdAt, unreadCount = if (incrementUnread) it.unreadCount + 1 else it.unreadCount) }
     }
     private fun preview(m: Message): MessagePreview {
-        val kind = when { m.deleted -> "deleted"; m.imageUrl != null && m.body.isEmpty() -> "image"; m.audioUrl != null && m.body.isEmpty() -> "audio"; else -> "text" }
-        val body = when (kind) { "deleted" -> ""; "image" -> "📷 Photo"; "audio" -> "🎤 Voice message"; else -> m.body }
+        val kind = when {
+            m.deleted -> "deleted"
+            m.imageUrl != null && m.body.isEmpty() -> "image"
+            m.audioUrl != null && m.body.isEmpty() -> "audio"
+            m.fileUrl != null && m.body.isEmpty() -> if (m.isVideo) "video" else "file"
+            else -> "text"
+        }
+        val body = when (kind) {
+            "deleted" -> ""; "image" -> "📷 Photo"; "audio" -> "🎤 Voice message"
+            "video" -> "🎬 Video"; "file" -> "📎 ${m.fileName ?: "File"}"
+            else -> m.body
+        }
         return MessagePreview(m.id, m.senderId, kind, body, m.createdAt)
     }
     private fun clearThread(id: String) { setThread(id) { it.copy(messages = emptyList(), hasMore = false, loaded = true) }; patch(id) { it.copy(lastMessage = null, unreadCount = 0) } }

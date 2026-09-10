@@ -29,4 +29,12 @@ class CallEventTest {
         assertNull(decode("""{"event":"call_offer","callId":"1"}"""))
         assertNull(decode("""{"event":"chat_message","conversationId":"1"}"""))
     }
+
+    @Test fun `media state — only the changed field is present`() {
+        val cameraOnly = decode("""{"event":"call_media_state","callId":"1","senderId":"alice","cameraEnabled":false}""") as CallEvent.MediaState
+        assertEquals(CallEvent.MediaState("1", false, null), cameraOnly)
+        val micOnly = decode("""{"event":"call_media_state","callId":"1","senderId":"alice","micEnabled":false}""") as CallEvent.MediaState
+        assertEquals(CallEvent.MediaState("1", null, false), micOnly)
+        assertNull(decode("""{"event":"call_media_state"}"""))
+    }
 }

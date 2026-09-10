@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      FileProvider for the composer's Camera-capture attachment option (MessageComposer's
+      CAMERA source in RelayChat.kt) — TakePicture() needs a content:// Uri to write into, and a
+      library module can't safely hand out a raw file:// path across app boundaries. Bundled here
+      (not left for the host app to declare) because it's pure plumbing, not a user-facing
+      permission: it grants nothing by itself. What DOES need the host app's own setup is the
+      actual CAMERA permission — `<uses-permission android:name="android.permission.CAMERA"/>` in
+      the host app's own manifest plus a runtime request — deliberately NOT declared here, so a
+      chat-only app that never uses the camera isn't forced to ask for it. See MessageComposer's
+      doc comment for the full requirement.
+
+      android:authorities uses ${applicationId} so it's unique per host app without any manifest
+      placeholder setup on their part — Gradle substitutes it automatically at merge time.
+    -->
+    <application>
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.relayfileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/relay_file_paths" />
+        </provider>
+    </application>
+</manifest>

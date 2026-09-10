@@ -33,6 +33,11 @@ data class CallState(
     val micEnabled: Boolean = true,
     val cameraEnabled: Boolean = true,
     val speakerEnabled: Boolean = false,
+    // The PEER's reported mic/camera state (call_media_state) — a disabled camera still sends
+    // frames (all black), so the UI uses this rather than "is there a remote track" to decide
+    // when to show the peer's avatar instead of a black rectangle.
+    val remoteMicEnabled: Boolean = true,
+    val remoteCameraEnabled: Boolean = true,
     val error: String? = null,
 )
 
@@ -61,6 +66,9 @@ class CallCenter(context: Context, private val client: RelayClient) {
     private var starting = false
     private var ringJob: Job? = null; private var connectJob: Job? = null; private var graceJob: Job? = null; private var restartJob: Job? = null
     private val audioManager get() = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+    /** Own display name for the self-view fallback (CallUi.kt) when the local camera is off. */
+    val myDisplayName: String? get() = client.me?.displayName
 
     init {
         scope.launch { client.events.collect { e -> if (e is RelayEvent.Unknown) CallEvent.decode(e.event, e.payload)?.let { handle(it) } } }
@@ -108,6 +116,11 @@ class CallCenter(context: Context, private val client: RelayClient) {
         starting = true
         scope.launch {
             try {
+                // Otherwise the caller sits at "Calling…" while the callee's side connects, times
+                // out, and hangs up on a peer that never heard a thing — the offer/ICE exchange
+                // rides the gateway socket, not this REST call. Idempotent/instant if already
+                // connected.
+                runCatching { client.connect() }
                 val res = try { client.api.startCall(conversation.id, type) } catch (e: RelayException) {
                     _state.update { it.copy(error = if (e.status == 409) "They're already on another call." else "Couldn't start the call. Please try again.") }; return@launch
                 } finally { starting = false }
@@ -143,6 +156,13 @@ class CallCenter(context: Context, private val client: RelayClient) {
         scope.launch {
             var m: PeerConnectionManager? = null
             try {
+                // Must happen before the REST answer call below — answering immediately prompts
+                // the caller to start sending its SDP offer + ICE candidates over the socket, and
+                // if this device was woken from a fully backgrounded/killed state via FCM, its own
+                // socket hasn't necessarily reconnected yet. Without this, that race can lose the
+                // entire signaling exchange to a gateway channel we weren't subscribed to yet.
+                // Idempotent/instant if already connected.
+                runCatching { client.connect() }
                 client.api.answerCall(callId)
                 if (current?.id != callId) return@launch
                 setCall { it?.copy(phase = CallPhase.CONNECTING) }
@@ -175,8 +195,16 @@ class CallCenter(context: Context, private val client: RelayClient) {
 
     fun decline() { val cur = current ?: return; if (cur.phase != CallPhase.INCOMING) return; scope.launch { runCatching { client.api.declineCall(cur.id) } }; cleanup() }
     fun hangUp() { val cur = current ?: return; scope.launch { runCatching { if (cur.phase == CallPhase.INCOMING) client.api.declineCall(cur.id) else client.api.endCall(cur.id) } }; cleanup() }
-    fun toggleMic() { _state.update { it.copy(micEnabled = !it.micEnabled) }; manager?.setMicEnabled(_state.value.micEnabled) }
-    fun toggleCamera() { _state.update { it.copy(cameraEnabled = !it.cameraEnabled) }; manager?.setCameraEnabled(_state.value.cameraEnabled) }
+    fun toggleMic() {
+        _state.update { it.copy(micEnabled = !it.micEnabled) }
+        manager?.setMicEnabled(_state.value.micEnabled)
+        current?.let { send("event" to "call_media_state", "callId" to it.id, "micEnabled" to JsonPrimitive(_state.value.micEnabled)) }
+    }
+    fun toggleCamera() {
+        _state.update { it.copy(cameraEnabled = !it.cameraEnabled) }
+        manager?.setCameraEnabled(_state.value.cameraEnabled)
+        current?.let { send("event" to "call_media_state", "callId" to it.id, "cameraEnabled" to JsonPrimitive(_state.value.cameraEnabled)) }
+    }
     fun toggleSpeaker() { _state.update { it.copy(speakerEnabled = !it.speakerEnabled) }; applySpeaker() }
     private fun applySpeaker() { runCatching { audioManager.mode = AudioManager.MODE_IN_COMMUNICATION; @Suppress("DEPRECATION") audioManager.isSpeakerphoneOn = _state.value.speakerEnabled } }
 
@@ -250,6 +278,17 @@ class CallCenter(context: Context, private val client: RelayClient) {
             is CallEvent.Declined -> if (cur?.id == e.callId) cleanup()
             is CallEvent.Missed -> if (cur?.id == e.callId) cleanup()
             is CallEvent.Ended -> if (cur?.id == e.callId) cleanup()
+            is CallEvent.MediaState -> if (cur?.id == e.callId) {
+                // Each toggle sends only the ONE field that changed — the other is null on this
+                // event, not false — so each side is applied independently or a mic-only update
+                // would wrongly stomp remoteCameraEnabled (or vice versa).
+                _state.update {
+                    it.copy(
+                        remoteCameraEnabled = e.cameraEnabled ?: it.remoteCameraEnabled,
+                        remoteMicEnabled = e.micEnabled ?: it.remoteMicEnabled,
+                    )
+                }
+            }
         }
     }
 }
