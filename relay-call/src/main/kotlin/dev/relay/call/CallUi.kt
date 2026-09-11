@@ -8,6 +8,7 @@ import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -264,15 +265,9 @@ fun GroupCallScreen(center: CallCenter, state: CallState, call: ActiveCall) {
     }
     val remoteIds = call.participantIds.filterNot { it == center.myUserId }
     Box(Modifier.fillMaxSize().background(Color(0xFF12182A))) {
-        GroupVideoGrid(state, remoteIds, Modifier.fillMaxSize())
+        GroupVideoGrid(center, state, call, remoteIds, Modifier.fillMaxSize())
         Text("${remoteIds.size + 1} on this call · $status", Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.statusBars).padding(top = 16.dp), color = if (call.phase == CallPhase.RECONNECTING) Color.Yellow else Color.White.copy(alpha = 0.75f))
         PermissionDeniedBanner(state.localMicPermissionDenied, state.localCameraPermissionDenied, Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.statusBars).padding(top = 44.dp, start = 24.dp, end = 24.dp))
-        if (call.type == CallType.VIDEO) state.localVideoTrack?.let { track ->
-            Box(Modifier.align(Alignment.BottomEnd).padding(16.dp, 0.dp, 16.dp, 120.dp).size(100.dp, 150.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF1D2540))) {
-                VideoView(track, Modifier.fillMaxSize().alpha(if (state.cameraEnabled) 1f else 0f), mirror = true)
-                if (!state.cameraEnabled) SelfAvatar(center)
-            }
-        }
         Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
             RoundButton(if (state.micEnabled) Icons.Filled.Mic else Icons.Filled.MicOff, "Mute", if (state.micEnabled) Color.White.copy(alpha = 0.2f) else Color.White, if (state.micEnabled) Color.White else Color.Black) { center.toggleMic() }
             if (call.type == CallType.VIDEO) RoundButton(if (state.cameraEnabled) Icons.Filled.Videocam else Icons.Filled.VideocamOff, "Camera", if (state.cameraEnabled) Color.White.copy(alpha = 0.2f) else Color.White, if (state.cameraEnabled) Color.White else Color.Black) { center.toggleCamera() }
@@ -282,15 +277,18 @@ fun GroupCallScreen(center: CallCenter, state: CallState, call: ActiveCall) {
     }
 }
 
+/** One grid for everyone on the call, your own tile included as just one more entry (last) —
+ *  matching web's `repeat(auto-fit, minmax(140px, 1fr))` / iOS's `.adaptive(minimum: 140)`: the
+ *  column count is however many ~140dp-wide tiles fit the available width, not a fixed 1-or-2
+ *  keyed off headcount, and there's no separate floating self-view PiP box. */
 @Composable
-private fun GroupVideoGrid(state: CallState, remoteIds: List<String>, modifier: Modifier = Modifier) {
+private fun GroupVideoGrid(center: CallCenter, state: CallState, call: ActiveCall, remoteIds: List<String>, modifier: Modifier = Modifier) {
     if (remoteIds.isEmpty()) {
         Box(modifier, contentAlignment = Alignment.Center) { Text("Waiting for others to join…", color = Color.White.copy(alpha = 0.7f)) }
         return
     }
-    val columns = if (remoteIds.size <= 1) 1 else 2
     LazyVerticalGrid(
-        columns = GridCells.Fixed(columns),
+        columns = GridCells.Adaptive(minSize = 140.dp),
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(2.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -298,7 +296,7 @@ private fun GroupVideoGrid(state: CallState, remoteIds: List<String>, modifier: 
         items(remoteIds) { userId ->
             val track = state.remoteVideoTracks[userId]
             val media = state.remoteParticipantMedia[userId] ?: RemoteParticipantMedia()
-            Box(Modifier.fillMaxSize().background(Color(0xFF1D2540))) {
+            Box(Modifier.aspectRatio(1f).background(Color(0xFF1D2540))) {
                 if (track != null && media.cameraEnabled) VideoView(track, Modifier.fillMaxSize())
                 else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Box(Modifier.size(64.dp).clip(CircleShape).background(Color.Gray.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
@@ -310,17 +308,21 @@ private fun GroupVideoGrid(state: CallState, remoteIds: List<String>, modifier: 
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun SelfAvatar(center: CallCenter) {
-    Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-        Box(Modifier.size(36.dp).clip(CircleShape).background(Color.Gray.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
-            Text((center.myDisplayName ?: "You").take(2).uppercase(), color = Color.White, style = MaterialTheme.typography.labelSmall)
+        item {
+            Box(Modifier.aspectRatio(1f).background(Color(0xFF1D2540))) {
+                if (call.type == CallType.VIDEO && state.cameraEnabled) state.localVideoTrack?.let { VideoView(it, Modifier.fillMaxSize(), mirror = true) }
+                else Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Box(Modifier.size(56.dp).clip(CircleShape).background(Color.Gray.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
+                        Text((center.myDisplayName ?: "You").take(2).uppercase(), color = Color.White, style = MaterialTheme.typography.titleMedium)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(center.myDisplayName ?: "You", color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                }
+                if (!state.micEnabled) {
+                    Icon(Icons.Filled.MicOff, "Muted", Modifier.align(Alignment.BottomStart).padding(6.dp).size(16.dp), tint = Color.White)
+                }
+            }
         }
-        Spacer(Modifier.height(4.dp))
-        Text(center.myDisplayName ?: "You", color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelSmall, maxLines = 1)
     }
 }
 
