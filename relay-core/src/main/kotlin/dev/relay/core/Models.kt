@@ -34,6 +34,8 @@ data class Conversation(
     val lastMessageAt: String? = null,
     val unreadCount: Int = 0,
     val createdAt: String,
+    /** Whether the CURRENT user has muted this conversation — personal preference, not visible to others. */
+    val muted: Boolean = false,
 ) {
     val title: String get() = if (isGroup) name ?: "Group" else peer?.displayName ?: peer?.userId ?: "Conversation"
 }

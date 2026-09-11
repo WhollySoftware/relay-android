@@ -99,6 +99,10 @@ class ChatStore internal constructor(private val api: RelayApi, private val sock
     suspend fun getParticipants(id: String): RelayApi.ParticipantsResponse = api.participants(id)
     suspend fun deleteConversation(id: String) { api.deleteConversation(id); remove(id) }
     suspend fun clearHistory(id: String) { api.clearHistory(id); clearThread(id) }
+    /** Optimistically patches local conversation state after the mute call succeeds — mirrors how other methods here patch after their API call. */
+    suspend fun muteConversation(id: String, muted: Boolean) { val r = api.muteConversation(id, muted); patch(id) { it.copy(muted = r.muted) } }
+    /** Same pagination as [loadMessages]/[loadOlderMessages], restricted to media/attachment messages — backs the "Media, links & docs" gallery. */
+    suspend fun getMedia(id: String, before: String? = null, limit: Int = 50): MessagesPage = api.getMedia(id, before, limit)
 
     fun refreshConversation(id: String) {
         synchronized(pendingFetch) {
@@ -302,6 +306,7 @@ class ChatStore internal constructor(private val api: RelayApi, private val sock
             is RelayEvent.ConversationUpdated -> patch(e.conversationId) { it.copy(name = e.name, photoUrl = e.photoUrl) }
             is RelayEvent.ConversationDeleted -> remove(e.conversationId)
             is RelayEvent.ConversationCleared -> clearThread(e.conversationId)
+            is RelayEvent.ConversationMuted -> patch(e.conversationId) { it.copy(muted = e.muted) }
             is RelayEvent.MembersAdded -> refreshConversation(e.conversationId)
             is RelayEvent.MemberRemoved -> refreshConversation(e.conversationId)
             is RelayEvent.MemberLeft -> refreshConversation(e.conversationId)

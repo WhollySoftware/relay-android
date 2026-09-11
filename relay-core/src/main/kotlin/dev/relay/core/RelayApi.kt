@@ -100,8 +100,19 @@ class RelayApi(private val config: RelayConfig, internal val tokens: TokenSource
     suspend fun removeMember(id: String, userId: String) { request("DELETE", "/conversations/$id/participants/${enc(userId)}", serializer = OkResult.serializer()) }
     suspend fun clearHistory(id: String) { request("POST", "/conversations/$id/clear", serializer = OkResult.serializer()) }
 
+    @Serializable private data class MuteBody(val muted: Boolean)
+    @Serializable data class MuteResult(val ok: Boolean, val muted: Boolean)
+
+    /** Mutes/unmutes this conversation for the CURRENT user only — personal preference, not visible to others. */
+    suspend fun muteConversation(id: String, muted: Boolean): MuteResult =
+        request("PATCH", "/conversations/$id/mute", RelayJson.json.encodeToString(MuteBody.serializer(), MuteBody(muted)), MuteResult.serializer())
+
     suspend fun messages(id: String, before: String? = null, limit: Int = 50): MessagesPage =
         request("GET", "/conversations/$id/messages?limit=$limit" + (before?.let { "&before=$it" } ?: ""), serializer = MessagesPage.serializer())
+
+    /** Same pagination as [messages], restricted to messages carrying an image/audio/file attachment — backs the "Media, links & docs" gallery. */
+    suspend fun getMedia(id: String, before: String? = null, limit: Int = 50): MessagesPage =
+        request("GET", "/conversations/$id/messages?kind=media&limit=$limit" + (before?.let { "&before=$it" } ?: ""), serializer = MessagesPage.serializer())
     suspend fun sendMessage(id: String, input: SendMessageInput): Message {
         val env = request("POST", "/conversations/$id/messages", RelayJson.json.encodeToString(SendMessageInput.serializer(), input), MessageEnv.serializer())
         return env.message.copy(clientId = env.clientId)
