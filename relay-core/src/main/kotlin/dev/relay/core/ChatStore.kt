@@ -97,6 +97,8 @@ class ChatStore internal constructor(private val api: RelayApi, private val sock
     suspend fun removeMember(id: String, userId: String) { api.removeMember(id, userId); refreshConversation(id) }
     /** Full participant list + who created the group — used by the "Group info" screen. */
     suspend fun getParticipants(id: String): RelayApi.ParticipantsResponse = api.participants(id)
+    /** Per-message-accurate read/delivery status for one message — a one-off fetch when "Message info" opens, no local caching. */
+    suspend fun getMessageReceipts(conversationId: String, messageId: String): RelayApi.MessageReceiptsResponse = api.getMessageReceipts(conversationId, messageId)
     suspend fun deleteConversation(id: String) { api.deleteConversation(id); remove(id) }
     suspend fun clearHistory(id: String) { api.clearHistory(id); clearThread(id) }
     /** Optimistically patches local conversation state after the mute call succeeds — mirrors how other methods here patch after their API call. */

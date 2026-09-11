@@ -75,6 +75,7 @@ data class Message(
 ) {
     val isPending: Boolean get() = status == MessageStatus.SENDING || status == MessageStatus.FAILED
     val isVideo: Boolean get() = fileUrl != null && (fileMime ?: "").startsWith("video/")
+    val isPdf: Boolean get() = fileUrl != null && fileMime == "application/pdf"
 }
 
 @Serializable

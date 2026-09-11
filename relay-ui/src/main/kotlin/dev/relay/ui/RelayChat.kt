@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -172,6 +173,7 @@ fun MessageThread(
     var forwarding by remember { mutableStateOf<Message?>(null) }
     var scrolledInitiallyFor by remember { mutableStateOf<String?>(null) }
     var showGroupDetail by rememberSaveable { mutableStateOf(false) }
+    var showInfo by remember { mutableStateOf<Message?>(null) }
     // Driven off scroll state rather than intercepting touch input, so it doesn't fight the
     // message bubbles' own tap-to-reply/long-press gestures — only a real fling/drag hides the
     // keyboard, not a plain tap on the list.
@@ -218,6 +220,18 @@ fun MessageThread(
         )
         return
     }
+    showInfo?.let { m ->
+        if (conversation != null) {
+            MessageInfoScreen(
+                client = client,
+                conversation = conversation,
+                message = m,
+                onBack = { showInfo = null },
+                modifier = modifier.fillMaxSize(),
+            )
+            return
+        }
+    }
     Column(modifier.fillMaxSize().imePadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
@@ -256,7 +270,8 @@ fun MessageThread(
                     onDiscard = { m.clientId?.let { client.chat.discardMessage(conversationId, it) } },
                     onReply = { replyTo = m },
                     onDelete = if (isOwn) ({ scope.launch { runCatching { client.chat.deleteMessage(conversationId, m.id) } } }) else null,
-                    onForward = { forwarding = m })
+                    onForward = { forwarding = m },
+                    onShowInfo = if (isOwn) ({ showInfo = m }) else null)
             }
         }
         val typing = state.typing[conversationId].orEmpty()
@@ -367,7 +382,7 @@ fun VoiceMessageRow(messageId: String, audioUrl: String, durationSec: Int?, tint
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = null, senderName: String? = null, seen: Boolean? = null, onRetry: () -> Unit = {}, onDiscard: () -> Unit = {}, onReply: () -> Unit = {}, onDelete: (() -> Unit)? = null, onForward: ((Message) -> Unit)? = null) {
+fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = null, senderName: String? = null, seen: Boolean? = null, onRetry: () -> Unit = {}, onDiscard: () -> Unit = {}, onReply: () -> Unit = {}, onDelete: (() -> Unit)? = null, onForward: ((Message) -> Unit)? = null, onShowInfo: (() -> Unit)? = null) {
     callMessageInfo(m.body)?.let { (label, missed) ->
         Column(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start) {
             CallMessageBubble(label, missed, isVideo = label.contains("Video", ignoreCase = true), time = time(m.createdAt), isOwn = isOwn)
@@ -417,6 +432,18 @@ fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = nu
                                         modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp).background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(999.dp)).padding(horizontal = 6.dp, vertical = 1.dp),
                                     )
                                 }
+                            }
+                        } else if (m.isPdf && m.fileThumbnailUrl != null) {
+                            Box(
+                                Modifier.width(220.dp).height(140.dp).clip(RoundedCornerShape(10.dp))
+                                    .background(Color.Black.copy(alpha = 0.3f)).clickable { openFile() },
+                            ) {
+                                AsyncImage(model = m.fileThumbnailUrl, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                                Icon(Icons.Filled.AttachFile, "PDF document", Modifier.align(Alignment.Center).size(40.dp), tint = Color.White)
+                                Text(
+                                    m.fileName ?: "Document", fontSize = 10.sp, color = Color.White, maxLines = 1,
+                                    modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(999.dp)).padding(horizontal = 6.dp, vertical = 1.dp),
+                                )
                             }
                         } else {
                             Row(
@@ -472,6 +499,9 @@ fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = nu
                         },
                         leadingIcon = { Icon(Icons.Filled.Share, null) },
                     )
+                }
+                if (onShowInfo != null && isOwn && !m.deleted && !m.isPending) {
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Message info") }, onClick = { showActions = false; onShowInfo() }, leadingIcon = { Icon(Icons.Filled.Info, null) })
                 }
                 if (onDelete != null && !m.deleted && !m.isPending && isOwn) {
                     androidx.compose.material3.DropdownMenuItem(text = { Text("Delete") }, onClick = { showActions = false; onDelete() }, leadingIcon = { Icon(Icons.Filled.Delete, null) })

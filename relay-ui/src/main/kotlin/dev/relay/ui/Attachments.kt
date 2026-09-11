@@ -3,8 +3,10 @@ package dev.relay.ui
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.pdf.PdfRenderer
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.util.Base64
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
@@ -70,6 +72,36 @@ private suspend fun videoThumbnail(context: Context, uri: Uri): Pair<String?, In
     }
 }
 
+/** A small JPEG render of a PDF's first page — entirely client-side, mirroring videoThumbnail's
+ *  best-effort style (nulls on any failure, e.g. a corrupt or encrypted PDF, rather than blocking
+ *  the send). Uses Android's built-in PdfRenderer (API 21+), no extra dependency needed. */
+private suspend fun pdfThumbnail(context: Context, uri: Uri): String? = withContext(Dispatchers.IO) {
+    var pfd: ParcelFileDescriptor? = null
+    var renderer: PdfRenderer? = null
+    var page: PdfRenderer.Page? = null
+    try {
+        pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return@withContext null
+        renderer = PdfRenderer(pfd)
+        if (renderer.pageCount <= 0) return@withContext null
+        page = renderer.openPage(0)
+        val maxDimension = 640
+        val scale = maxDimension.toFloat() / maxOf(page.width, page.height)
+        val width = if (scale < 1f) (page.width * scale).toInt() else page.width
+        val height = if (scale < 1f) (page.height * scale).toInt() else page.height
+        val bitmap = Bitmap.createBitmap(maxOf(width, 1), maxOf(height, 1), Bitmap.Config.ARGB_8888)
+        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 60, out)
+        "data:image/jpeg;base64,${Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)}"
+    } catch (e: Exception) {
+        null
+    } finally {
+        page?.close()
+        renderer?.close()
+        pfd?.close()
+    }
+}
+
 /** Handles a gallery-picked image or video Uri (ActivityResultContracts.PickVisualMedia). */
 suspend fun loadPickedMedia(context: Context, uri: Uri): Result<PickedAttachment> {
     val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
@@ -78,6 +110,11 @@ suspend fun loadPickedMedia(context: Context, uri: Uri): Result<PickedAttachment
         val (thumb, duration) = videoThumbnail(context, uri)
         val name = "video_${System.currentTimeMillis()}.${mime.substringAfterLast('/')}"
         Result.success(PickedAttachment.FileAttachment(bytesToDataUrl(read.first, mime), name, mime, thumb, duration))
+    } else if (mime == "application/pdf") {
+        val read = readUri(context, uri, MAX_ATTACHMENT_BYTES) ?: return Result.failure(IllegalStateException("That file is too large (max ~9.5MB)."))
+        val thumb = pdfThumbnail(context, uri)
+        val name = "document_${System.currentTimeMillis()}.pdf"
+        Result.success(PickedAttachment.FileAttachment(bytesToDataUrl(read.first, mime), name, mime, thumb, null))
     } else {
         // Try as-is first (fast path for an already-small photo); only downscale if it's over cap.
         val direct = readUri(context, uri, MAX_IMAGE_BYTES)
@@ -95,7 +132,9 @@ suspend fun loadPickedFile(context: Context, uri: Uri): Result<PickedAttachment>
     val read = readUri(context, uri, MAX_ATTACHMENT_BYTES) ?: return Result.failure(IllegalStateException("That file is too large (max ~9.5MB)."))
     val (bytes, mime) = read
     val name = queryDisplayName(context, uri) ?: uri.lastPathSegment ?: "file"
-    val (thumb, duration) = if (mime.startsWith("video/")) videoThumbnail(context, uri) else null to null
+    val (thumb, duration) = if (mime.startsWith("video/")) videoThumbnail(context, uri)
+        else if (mime == "application/pdf") pdfThumbnail(context, uri) to null
+        else null to null
     return Result.success(PickedAttachment.FileAttachment(bytesToDataUrl(bytes, mime), name, mime, thumb, duration))
 }
 

@@ -123,6 +123,14 @@ class RelayApi(private val config: RelayConfig, internal val tokens: TokenSource
     suspend fun markRead(id: String): ReadResult = request("POST", "/conversations/$id/read", serializer = ReadResult.serializer())
     suspend fun readReceipts(id: String): List<ReadReceipt> = request("GET", "/conversations/$id/read-receipts", serializer = ReceiptsEnv.serializer()).receipts
 
+    @Serializable data class MessageReceiptEntry(val userId: String, val readAt: String? = null, val deliveredAt: String? = null)
+    @Serializable data class MessageReceiptsResponse(val readBy: List<MessageReceiptEntry>, val deliveredTo: List<MessageReceiptEntry>)
+
+    /** Per-message-accurate read/delivery status for a message the current user sent — who has
+     *  read it (and when) vs. who it's only been delivered to (and when). Backs the "Message info" screen. */
+    suspend fun getMessageReceipts(conversationId: String, messageId: String): MessageReceiptsResponse =
+        request("GET", "/conversations/$conversationId/messages/$messageId/receipts", serializer = MessageReceiptsResponse.serializer())
+
     @Serializable private data class LinkPreviewEnv(val preview: LinkPreview? = null)
 
     /** OG metadata for a URL found in a message body, for a WhatsApp-style preview card. Server-
