@@ -16,7 +16,10 @@ enum class CallType(val wire: String) { AUDIO("audio"), VIDEO("video") }
 @Serializable
 data class Call(
     val callId: String, val conversationId: String, val type: String, val status: String,
-    val callerId: String, val calleeId: String, val startedAt: String? = null, val endedAt: String? = null,
+    // calleeId is null for a group call (there's no single callee — see call_participants
+    // instead); isGroup defaults false so this still decodes fine against an old 1:1-only server.
+    val callerId: String, val calleeId: String? = null, val isGroup: Boolean = false,
+    val startedAt: String? = null, val endedAt: String? = null,
     val endReason: String? = null, val createdAt: String,
 )
 
