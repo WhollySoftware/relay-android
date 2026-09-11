@@ -1,7 +1,10 @@
 package dev.relay.call
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioManager
+import androidx.core.content.ContextCompat
 import dev.relay.core.Conversation
 import dev.relay.core.RelayClient
 import dev.relay.core.RelayEvent
@@ -53,6 +56,12 @@ data class CallState(
     val remoteCameraEnabled: Boolean = true,
     /** Per-participant mic/camera, for a group call. Empty for 1:1 — use the scalars above. */
     val remoteParticipantMedia: Map<String, RemoteParticipantMedia> = emptyMap(),
+    // Whether OUR OWN mic/camera is unavailable because the OS permission is denied — computed
+    // once from the current permission state when the call starts/is answered (not a live
+    // permission-change listener). The peer can still be heard/seen fine (see LocalMedia); this
+    // just drives the "they can't hear/see you" banner in CallUi.
+    val localMicPermissionDenied: Boolean = false,
+    val localCameraPermissionDenied: Boolean = false,
     val error: String? = null,
 )
 
@@ -130,6 +139,9 @@ class CallCenter(context: Context, private val client: RelayClient) {
     // disconnected if the user ignores it) — mirror the server's 2-minute ring timeout locally.
     private fun scheduleIncomingTimeout(callId: String) { ringJob?.cancel(); ringJob = scope.launch { delay(120_000); if (current?.id == callId && current?.phase == CallPhase.INCOMING) cleanup() } }
     private fun setCall(change: (ActiveCall?) -> ActiveCall?) = _state.update { it.copy(call = change(it.call)) }
+    /** Current denial for this permission, checked fresh (not cached) each time a call starts/is
+     *  answered — see [CallState.localMicPermissionDenied]. */
+    private fun permissionDenied(permission: String) = ContextCompat.checkSelfPermission(appContext, permission) != PackageManager.PERMISSION_GRANTED
     private fun send(vararg pairs: Pair<String, Any?>) = client.sendFrame(buildJsonObject { pairs.forEach { (k, v) -> when (v) { null -> {}; is String -> put(k, v); is JsonElement -> put(k, v); else -> put(k, v.toString()) } } })
     private fun sdpJson(s: SdpPayload) = buildJsonObject { put("type", s.type); put("sdp", s.sdp) }
 
@@ -185,7 +197,7 @@ class CallCenter(context: Context, private val client: RelayClient) {
                     }
                     if (current?.id != callId) { m.close(); return@launch }
                     peers[displayPeerId] = m
-                    _state.update { it.copy(localVideoTrack = localMedia?.videoTrack, speakerEnabled = type == CallType.VIDEO) }
+                    _state.update { it.copy(localVideoTrack = localMedia?.videoTrack, speakerEnabled = type == CallType.VIDEO, localMicPermissionDenied = permissionDenied(Manifest.permission.RECORD_AUDIO), localCameraPermissionDenied = type == CallType.VIDEO && permissionDenied(Manifest.permission.CAMERA)) }
                     applySpeaker()
                     pendingAcceptRecipient?.let { if (current?.phase == CallPhase.CONNECTING) { pendingAcceptRecipient = null; sendOffer(m, callId, displayPeerId) } }
                 } else {
@@ -197,7 +209,7 @@ class CallCenter(context: Context, private val client: RelayClient) {
                         val lm = LocalMedia.acquire(appContext, type)
                         if (current?.id != callId) { lm.close(); return@launch }
                         localMedia = lm
-                        _state.update { it.copy(localVideoTrack = lm.videoTrack, speakerEnabled = type == CallType.VIDEO) }
+                        _state.update { it.copy(localVideoTrack = lm.videoTrack, speakerEnabled = type == CallType.VIDEO, localMicPermissionDenied = permissionDenied(Manifest.permission.RECORD_AUDIO), localCameraPermissionDenied = type == CallType.VIDEO && permissionDenied(Manifest.permission.CAMERA)) }
                         applySpeaker()
                     } catch (e: Exception) {
                         if (current?.id != callId) return@launch
@@ -239,7 +251,7 @@ class CallCenter(context: Context, private val client: RelayClient) {
                     mgr.start(lm, servers)
                     if (current?.id != callId) { mgr.close(); return@launch }
                     peers[cur.peerId] = mgr
-                    _state.update { it.copy(localVideoTrack = lm.videoTrack, speakerEnabled = cur.type == CallType.VIDEO) }
+                    _state.update { it.copy(localVideoTrack = lm.videoTrack, speakerEnabled = cur.type == CallType.VIDEO, localMicPermissionDenied = permissionDenied(Manifest.permission.RECORD_AUDIO), localCameraPermissionDenied = cur.type == CallType.VIDEO && permissionDenied(Manifest.permission.CAMERA)) }
                     applySpeaker()
                     pendingOffer?.takeIf { it.first == callId }?.let { (_, sdp) ->
                         pendingOffer = null
@@ -253,7 +265,7 @@ class CallCenter(context: Context, private val client: RelayClient) {
                     val lm = LocalMedia.acquire(appContext, cur.type)
                     if (current?.id != callId) { lm.close(); return@launch }
                     localMedia = lm
-                    _state.update { it.copy(localVideoTrack = lm.videoTrack, speakerEnabled = cur.type == CallType.VIDEO) }
+                    _state.update { it.copy(localVideoTrack = lm.videoTrack, speakerEnabled = cur.type == CallType.VIDEO, localMicPermissionDenied = permissionDenied(Manifest.permission.RECORD_AUDIO), localCameraPermissionDenied = cur.type == CallType.VIDEO && permissionDenied(Manifest.permission.CAMERA)) }
                     applySpeaker()
                     val servers = iceServers()
                     if (current?.id != callId) return@launch

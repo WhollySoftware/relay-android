@@ -1,6 +1,9 @@
 package dev.relay.call
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.webrtc.AudioTrack
 import org.webrtc.Camera2Enumerator
@@ -68,10 +71,16 @@ class LocalMedia private constructor(
         fun acquire(context: Context, type: CallType): LocalMedia {
             RelayWebRtc.ensure(context)
             var audio: AudioTrack? = null
-            try { audio = RelayWebRtc.factory.createAudioTrack("audio0", RelayWebRtc.factory.createAudioSource(MediaConstraints())) }
-            catch (_: Exception) { /* listen-only on this side */ }
+            // Checked up front rather than relying on the SecurityException a denied mic/camera
+            // would throw anyway — this way "no permission" and "permission granted but the
+            // hardware failed" both land in the same best-effort null-track path below, and we
+            // never even attempt an acquisition we already know is disallowed.
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                try { audio = RelayWebRtc.factory.createAudioTrack("audio0", RelayWebRtc.factory.createAudioSource(MediaConstraints())) }
+                catch (_: Exception) { /* listen-only on this side */ }
+            }
             var video: VideoTrack? = null; var capturer: CameraVideoCapturer? = null; var helper: SurfaceTextureHelper? = null
-            if (type == CallType.VIDEO) try {
+            if (type == CallType.VIDEO && ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) try {
                 val enumerator = Camera2Enumerator(context)
                 val device = enumerator.deviceNames.firstOrNull { enumerator.isFrontFacing(it) } ?: enumerator.deviceNames.firstOrNull()
                 if (device != null) {

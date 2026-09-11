@@ -123,6 +123,14 @@ private fun rememberCallAction(onGranted: (CallType) -> Unit): (CallType) -> Uni
     }
 }
 
+/** Shared by [PermissionSettingsDialog] and the in-call permission banner. */
+private fun openAppSettings(context: android.content.Context) {
+    context.startActivity(
+        android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", context.packageName, null))
+            .apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) },
+    )
+}
+
 @Composable
 private fun PermissionSettingsDialog(onDismiss: () -> Unit, message: String = "Camera and microphone access are needed for calls. Enable them in Settings to continue.") {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -131,21 +139,51 @@ private fun PermissionSettingsDialog(onDismiss: () -> Unit, message: String = "C
         title = { Text("Permission needed") },
         text = { Text(message) },
         confirmButton = {
-            androidx.compose.material3.TextButton(onClick = {
-                onDismiss()
-                context.startActivity(
-                    android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", context.packageName, null))
-                        .apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) },
-                )
-            }) { Text("Open Settings") }
+            androidx.compose.material3.TextButton(onClick = { onDismiss(); openAppSettings(context) }) { Text("Open Settings") }
         },
         dismissButton = { androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
+/** A small persistent pill shown in-call when our own mic/camera is unusable because the OS
+ *  permission is denied — the peer still comes through fine (see LocalMedia), only OUR outgoing
+ *  media is missing. Unlike [PermissionSettingsDialog] this never blocks the call controls. */
+@Composable
+private fun PermissionDeniedBanner(micDenied: Boolean, cameraDenied: Boolean, modifier: Modifier = Modifier) {
+    if (!micDenied && !cameraDenied) return
+    val context = LocalContext.current
+    val what = if (micDenied && cameraDenied) "Microphone/camera" else if (micDenied) "Microphone" else "Camera"
+    val verb = if (micDenied && cameraDenied) "hear/see" else if (micDenied) "hear" else "see"
+    Row(
+        modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.6f)).padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("$what access needed — you can $verb the other person, but they can't $verb you.", color = Color.White, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f, fill = false))
+        Text("Open Settings", color = Color(0xFF60A5FA), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { openAppSettings(context) })
+    }
+}
+
+/** Requests whatever mic/camera permission is missing (so the OS prompt can still appear, and if
+ *  granted right then it gets used) but — unlike [rememberCallAction] — never gates on the
+ *  result: an incoming call must always be answerable, even fully denied, since the peer can
+ *  still be heard/seen (see LocalMedia / PeerConnectionManager). */
+@Composable
+private fun rememberAnswerAction(center: CallCenter): (CallType) -> Unit {
+    val context = LocalContext.current
+    val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { /* answer() already ran regardless of the outcome */ }
+    return { type ->
+        keyboardController?.hide()
+        val missing = permissionsFor(type).filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) launcher.launch(missing.toTypedArray())
+        center.answer()
+    }
+}
+
 @Composable
 fun IncomingCallBanner(center: CallCenter, call: ActiveCall, modifier: Modifier = Modifier) {
-    val answer = rememberCallAction { center.answer() }
+    val answer = rememberAnswerAction(center)
     Surface(modifier.padding(12.dp).fillMaxWidth(), shape = RoundedCornerShape(16.dp), tonalElevation = 6.dp, shadowElevation = 6.dp) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -186,6 +224,7 @@ fun CallScreen(center: CallCenter, state: CallState, call: ActiveCall) {
             }
         }
         Text(status, Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.statusBars).padding(top = 16.dp), color = if (call.phase == CallPhase.RECONNECTING) Color.Yellow else Color.White.copy(alpha = 0.75f))
+        PermissionDeniedBanner(state.localMicPermissionDenied, state.localCameraPermissionDenied, Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.statusBars).padding(top = 44.dp, start = 24.dp, end = 24.dp))
         // The renderer stays mounted (not conditionally) when the camera is off, so its track
         // assignment survives the toggle — only the overlay changes. Without this the box shows a
         // stale black frame instead of your own avatar when you turn your camera off mid-call.
@@ -227,6 +266,7 @@ fun GroupCallScreen(center: CallCenter, state: CallState, call: ActiveCall) {
     Box(Modifier.fillMaxSize().background(Color(0xFF12182A))) {
         GroupVideoGrid(state, remoteIds, Modifier.fillMaxSize())
         Text("${remoteIds.size + 1} on this call · $status", Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.statusBars).padding(top = 16.dp), color = if (call.phase == CallPhase.RECONNECTING) Color.Yellow else Color.White.copy(alpha = 0.75f))
+        PermissionDeniedBanner(state.localMicPermissionDenied, state.localCameraPermissionDenied, Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.statusBars).padding(top = 44.dp, start = 24.dp, end = 24.dp))
         if (call.type == CallType.VIDEO) state.localVideoTrack?.let { track ->
             Box(Modifier.align(Alignment.BottomEnd).padding(16.dp, 0.dp, 16.dp, 120.dp).size(100.dp, 150.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF1D2540))) {
                 VideoView(track, Modifier.fillMaxSize().alpha(if (state.cameraEnabled) 1f else 0f), mirror = true)
