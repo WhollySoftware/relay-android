@@ -3,6 +3,8 @@ package dev.relay.ui
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,12 +14,20 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -38,6 +48,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -85,7 +97,11 @@ fun GroupDetailScreen(
     fun load() {
         scope.launch {
             runCatching { client.chat.getParticipants(conversation.id) }
-                .onSuccess { r -> participants = r.participants; creatorId = r.creatorId ?: creatorId }
+                .onSuccess { r ->
+                    // Admin (the creator) always shown first, everyone else keeps the server's join order.
+                    participants = r.creatorId?.let { cid -> r.participants.sortedBy { it.userId != cid } } ?: r.participants
+                    creatorId = r.creatorId ?: creatorId
+                }
                 .onFailure { error = "Could not load participants." }
         }
     }
@@ -190,13 +206,14 @@ fun GroupDetailScreen(
         return
     }
 
-    Column(modifier.fillMaxSize()) {
+    Column(modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerLowest)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            Text("Group info", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Text("Group info", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            Spacer(Modifier.width(48.dp))
         }
         HorizontalDivider()
-        LazyColumn(Modifier.weight(1f)) {
+        LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)) {
             item {
                 if (!editing) {
                     Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -245,73 +262,69 @@ fun GroupDetailScreen(
                     }
                 }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) }
-                HorizontalDivider()
             }
             item {
-                Column {
-                    ActionRow(icon = "🖼️", label = "Media, links & docs", onClick = { showMedia = true })
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("🔕", modifier = Modifier.width(32.dp))
-                        Text("Mute notifications", modifier = Modifier.weight(1f))
-                        Switch(checked = conv.muted, onCheckedChange = { if (!muteBusy) handleToggleMute() }, enabled = !muteBusy)
-                    }
-                    HorizontalDivider()
-                    ActionRow(icon = "🧹", label = "Clear chat", onClick = { confirmClear = true }, enabled = !clearBusy)
+                GroupedCard {
+                    ActionRow(icon = Icons.Filled.Photo, label = "Media, links & docs", onClick = { showMedia = true }, trailing = {
+                        Icon(Icons.Filled.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    })
+                    RowDivider()
                     ActionRow(
-                        icon = "🚪",
+                        icon = Icons.Filled.NotificationsOff,
+                        label = "Mute notifications",
+                        onClick = { if (!muteBusy) handleToggleMute() },
+                        trailing = { Switch(checked = conv.muted, onCheckedChange = { if (!muteBusy) handleToggleMute() }, enabled = !muteBusy) },
+                    )
+                    RowDivider()
+                    ActionRow(icon = Icons.Filled.Delete, label = "Clear chat", onClick = { confirmClear = true }, enabled = !clearBusy, color = MaterialTheme.colorScheme.error)
+                    RowDivider()
+                    ActionRow(
+                        icon = Icons.AutoMirrored.Filled.Logout,
                         label = "Leave group",
                         onClick = { confirmLeave = true },
                         enabled = !leaveBusy,
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
-                HorizontalDivider()
             }
-            if (isAdmin && onPickAdd != null) {
-                item {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        IconButton(onClick = { if (!addingBusy) handleAdd() }, enabled = !addingBusy) { Icon(Icons.Filled.Add, "Add people") }
-                        Spacer(Modifier.width(4.dp))
-                        Text(if (addingBusy) "Adding…" else "Add people", color = MaterialTheme.colorScheme.primary)
+            item {
+                GroupedCard {
+                    if (isAdmin && onPickAdd != null) {
+                        ActionRow(icon = Icons.Filled.Add, label = if (addingBusy) "Adding…" else "Add people", onClick = { if (!addingBusy) handleAdd() }, enabled = !addingBusy, color = MaterialTheme.colorScheme.primary, circleColor = MaterialTheme.colorScheme.primaryContainer)
+                        RowDivider()
                     }
-                    HorizontalDivider()
-                }
-            }
-            if (participants == null) {
-                item { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
-            } else {
-                items(participants!!, key = { it.userId }) { p ->
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Avatar(name = p.displayName ?: p.userId, url = p.avatarUrl, size = 36.dp)
-                        Spacer(Modifier.width(12.dp))
-                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                            Text(p.displayName ?: p.userId, maxLines = 1)
-                            if (p.userId == creatorId) {
-                                Spacer(Modifier.width(6.dp))
-                                Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
-                                    Text(
-                                        "Admin",
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    )
+                    if (participants == null) {
+                        Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                    } else {
+                        participants!!.forEachIndexed { index, p ->
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Avatar(name = p.displayName ?: p.userId, url = p.avatarUrl, size = 36.dp)
+                                Spacer(Modifier.width(12.dp))
+                                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                                    Text(p.displayName ?: p.userId, maxLines = 1)
+                                    if (p.userId == creatorId) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Surface(color = MaterialTheme.colorScheme.surfaceContainerHighest, shape = MaterialTheme.shapes.small) {
+                                            Text(
+                                                "Admin",
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                    if (myUserId != null && p.userId == myUserId) Text(" (You)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                if (isAdmin && p.userId != creatorId) {
+                                    TextButton(onClick = { confirmRemove = p }, enabled = busyUserId != p.userId) {
+                                        Text(if (busyUserId == p.userId) "Removing…" else "Remove", color = MaterialTheme.colorScheme.error)
+                                    }
                                 }
                             }
-                            if (myUserId != null && p.userId == myUserId) Text(" (You)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        if (isAdmin && p.userId != creatorId) {
-                            TextButton(onClick = { confirmRemove = p }, enabled = busyUserId != p.userId) {
-                                Text(if (busyUserId == p.userId) "Removing…" else "Remove", color = MaterialTheme.colorScheme.error)
-                            }
+                            if (index != participants!!.lastIndex) RowDivider()
                         }
                     }
                 }
@@ -348,24 +361,52 @@ fun GroupDetailScreen(
     }
 }
 
+/** Rounded, elevated section container — groups related rows the way iOS's Group info screen does
+ *  (a "Settings app" style card), instead of a flat edge-to-edge list. */
+@Composable
+private fun GroupedCard(content: @Composable () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
+        Column { content() }
+    }
+}
+
+@Composable
+private fun RowDivider() {
+    HorizontalDivider(modifier = Modifier.padding(start = 60.dp), color = MaterialTheme.colorScheme.outlineVariant)
+}
+
+/** A single row with a circular icon badge (leading) — mirrors iOS's grouped-list row style. */
 @Composable
 private fun ActionRow(
-    icon: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     onClick: () -> Unit,
     enabled: Boolean = true,
-    color: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.Unspecified,
+    color: Color = Color.Unspecified,
+    circleColor: Color = Color.Unspecified,
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        Modifier.fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TextButton(onClick = onClick, enabled = enabled) {
-            Text(icon, modifier = Modifier.width(28.dp))
-            Text(label, color = color)
+        Box(
+            Modifier.size(32.dp).clip(CircleShape)
+                .background(if (circleColor != Color.Unspecified) circleColor else MaterialTheme.colorScheme.surfaceContainerHighest),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, null, tint = if (color != Color.Unspecified) color else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
         }
+        Spacer(Modifier.width(14.dp))
+        Text(label, color = color, modifier = Modifier.weight(1f))
+        trailing?.invoke()
     }
-    HorizontalDivider()
 }
 
 private val MONTHS = arrayOf(
