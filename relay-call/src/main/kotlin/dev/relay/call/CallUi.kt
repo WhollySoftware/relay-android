@@ -21,6 +21,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -71,7 +74,7 @@ fun RelayCallOverlay(center: CallCenter) {
         when (call?.phase) {
             null -> {}
             CallPhase.INCOMING -> IncomingCallBanner(center, call, Modifier.align(Alignment.TopCenter))
-            else -> CallScreen(center, state, call)
+            else -> if (call.isGroup) GroupCallScreen(center, state, call) else CallScreen(center, state, call)
         }
         state.error?.let { msg ->
             Surface(Modifier.align(Alignment.TopCenter).padding(12.dp).clickable { center.clearError() }, color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(10.dp)) {
@@ -209,11 +212,83 @@ fun CallScreen(center: CallCenter, state: CallState, call: ActiveCall) {
     }
 }
 
+/** Full-screen group call view: one tile per remote participant plus a local self-preview, with
+ *  the same global mic/camera/speaker/hangup controls as the 1:1 [CallScreen] — a group call has
+ *  no per-remote-participant controls, only a grid of who's on it. */
+@Composable
+fun GroupCallScreen(center: CallCenter, state: CallState, call: ActiveCall) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(call.phase) { while (true) { delay(1000); now = System.currentTimeMillis() } }
+    val status = when (call.phase) {
+        CallPhase.CONNECTING -> "Connecting…"; CallPhase.RECONNECTING -> "Reconnecting…"
+        else -> call.startedAtMs?.let { val s = ((now - it) / 1000).coerceAtLeast(0); "%02d:%02d".format(s / 60, s % 60) } ?: ""
+    }
+    val remoteIds = call.participantIds.filterNot { it == center.myUserId }
+    Box(Modifier.fillMaxSize().background(Color(0xFF12182A))) {
+        GroupVideoGrid(state, remoteIds, Modifier.fillMaxSize())
+        Text("${remoteIds.size + 1} on this call · $status", Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.statusBars).padding(top = 16.dp), color = if (call.phase == CallPhase.RECONNECTING) Color.Yellow else Color.White.copy(alpha = 0.75f))
+        if (call.type == CallType.VIDEO) state.localVideoTrack?.let { track ->
+            Box(Modifier.align(Alignment.BottomEnd).padding(16.dp, 0.dp, 16.dp, 120.dp).size(100.dp, 150.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF1D2540))) {
+                VideoView(track, Modifier.fillMaxSize().alpha(if (state.cameraEnabled) 1f else 0f), mirror = true)
+                if (!state.cameraEnabled) SelfAvatar(center)
+            }
+        }
+        Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+            RoundButton(if (state.micEnabled) Icons.Filled.Mic else Icons.Filled.MicOff, "Mute", if (state.micEnabled) Color.White.copy(alpha = 0.2f) else Color.White, if (state.micEnabled) Color.White else Color.Black) { center.toggleMic() }
+            if (call.type == CallType.VIDEO) RoundButton(if (state.cameraEnabled) Icons.Filled.Videocam else Icons.Filled.VideocamOff, "Camera", if (state.cameraEnabled) Color.White.copy(alpha = 0.2f) else Color.White, if (state.cameraEnabled) Color.White else Color.Black) { center.toggleCamera() }
+            RoundButton(if (state.speakerEnabled) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff, "Speaker", if (state.speakerEnabled) Color.White else Color.White.copy(alpha = 0.2f), if (state.speakerEnabled) Color.Black else Color.White) { center.toggleSpeaker() }
+            RoundButton(Icons.Filled.CallEnd, "End call", Color(0xFFDC2626)) { center.hangUp() }
+        }
+    }
+}
+
+@Composable
+private fun GroupVideoGrid(state: CallState, remoteIds: List<String>, modifier: Modifier = Modifier) {
+    if (remoteIds.isEmpty()) {
+        Box(modifier, contentAlignment = Alignment.Center) { Text("Waiting for others to join…", color = Color.White.copy(alpha = 0.7f)) }
+        return
+    }
+    val columns = if (remoteIds.size <= 1) 1 else 2
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(columns),
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        items(remoteIds) { userId ->
+            val track = state.remoteVideoTracks[userId]
+            val media = state.remoteParticipantMedia[userId] ?: RemoteParticipantMedia()
+            Box(Modifier.fillMaxSize().background(Color(0xFF1D2540))) {
+                if (track != null && media.cameraEnabled) VideoView(track, Modifier.fillMaxSize())
+                else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(64.dp).clip(CircleShape).background(Color.Gray.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
+                        Text(userId.take(2).uppercase(), color = Color.White, style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+                if (!media.micEnabled) {
+                    Icon(Icons.Filled.MicOff, "Muted", Modifier.align(Alignment.BottomStart).padding(6.dp).size(16.dp), tint = Color.White)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelfAvatar(center: CallCenter) {
+    Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        Box(Modifier.size(36.dp).clip(CircleShape).background(Color.Gray.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
+            Text((center.myDisplayName ?: "You").take(2).uppercase(), color = Color.White, style = MaterialTheme.typography.labelSmall)
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(center.myDisplayName ?: "You", color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelSmall, maxLines = 1)
+    }
+}
+
 /** Audio + video call buttons for a 1:1 thread header (pass as MessageThread's headerActions). */
 @Composable
 fun CallButtons(center: CallCenter, conversation: Conversation) {
     val state by center.state.collectAsStateWithLifecycle()
-    if (conversation.isGroup || conversation.peer == null) return
+    if (conversation.peer == null && !conversation.isGroup) return
     val start = rememberCallAction { type -> center.start(conversation, type) }
     IconButton(onClick = { start(CallType.AUDIO) }, enabled = state.call == null) { Icon(Icons.Filled.Call, "Audio call") }
     IconButton(onClick = { start(CallType.VIDEO) }, enabled = state.call == null) { Icon(Icons.Filled.Videocam, "Video call") }

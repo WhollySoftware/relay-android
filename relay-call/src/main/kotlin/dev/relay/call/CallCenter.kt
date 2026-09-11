@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -24,27 +25,42 @@ import org.webrtc.VideoTrack
 
 enum class CallPhase { OUTGOING, INCOMING, CONNECTING, ACTIVE, RECONNECTING }
 
-data class ActiveCall(val id: String, val conversationId: String, val peerId: String, val peerName: String?, val type: CallType, val phase: CallPhase, val startedAtMs: Long? = null)
+data class ActiveCall(
+    val id: String, val conversationId: String, val peerId: String, val peerName: String?, val type: CallType, val phase: CallPhase, val startedAtMs: Long? = null,
+    /** Group calls (mesh, up to 6) are the N>1 case of the same state machine — see protocol/events.md. */
+    val isGroup: Boolean = false,
+    /** Everyone currently invited/joined (including self), kept in sync as people join/leave/decline. Always [peerId] for a 1:1 call. */
+    val participantIds: List<String> = emptyList(),
+)
+
+/** One remote participant's reported mic/camera state, for a group call. */
+data class RemoteParticipantMedia(val micEnabled: Boolean = true, val cameraEnabled: Boolean = true)
 
 data class CallState(
     val call: ActiveCall? = null,
     val localVideoTrack: VideoTrack? = null,
+    /** 1:1 only — the one remote video track. For a group call use [remoteVideoTracks]. */
     val remoteVideoTrack: VideoTrack? = null,
+    /** Every remote participant's video track, keyed by userId. Has exactly one entry for a 1:1 call. */
+    val remoteVideoTracks: Map<String, VideoTrack> = emptyMap(),
     val micEnabled: Boolean = true,
     val cameraEnabled: Boolean = true,
     val speakerEnabled: Boolean = false,
     // The PEER's reported mic/camera state (call_media_state) — a disabled camera still sends
     // frames (all black), so the UI uses this rather than "is there a remote track" to decide
-    // when to show the peer's avatar instead of a black rectangle.
+    // when to show the peer's avatar instead of a black rectangle. 1:1 only.
     val remoteMicEnabled: Boolean = true,
     val remoteCameraEnabled: Boolean = true,
+    /** Per-participant mic/camera, for a group call. Empty for 1:1 — use the scalars above. */
+    val remoteParticipantMedia: Map<String, RemoteParticipantMedia> = emptyMap(),
     val error: String? = null,
 )
 
 /**
- * 1:1 call state machine — the same rules as RelayCall (iOS) and @relay/core: one call at a time,
+ * Call state machine — the same rules as RelayCall (iOS) and @relay/core: one call at a time,
  * events validated against the current callId, buffered early signaling, the answered-elsewhere
- * race excluded for the answering device, ICE restart with a reconnecting grace period.
+ * race excluded for the answering device, ICE restart with a reconnecting grace period. A 1:1 call
+ * is simply the N=1 case of the same multi-peer (mesh) machinery used for group calls.
  *
  *     val calls = CallCenter(context, relay)
  *     calls.start(conversation, CallType.VIDEO)
@@ -58,9 +74,14 @@ class CallCenter(context: Context, private val client: RelayClient) {
     private val _state = MutableStateFlow(CallState())
     val state: StateFlow<CallState> = _state.asStateFlow()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var manager: PeerConnectionManager? = null
+    /** One PeerConnectionManager per remote participant, keyed by their userId. A 1:1 call has
+     *  exactly one entry (keyed by peerId). All entries for a call share [localMedia]. */
+    private val peers = mutableMapOf<String, PeerConnectionManager>()
+    /** The one mic/camera acquisition for the current call, shared across every peer (see LocalMedia). */
+    private var localMedia: LocalMedia? = null
     private var pendingOffer: Pair<String, SdpPayload>? = null
-    private val pendingCandidates = mutableListOf<Pair<String, IceCandidatePayload>>()
+    /** ICE candidates that arrived before their sender's PeerConnectionManager existed: (callId, senderId, candidate). */
+    private val pendingCandidates = mutableListOf<Triple<String, String, IceCandidatePayload>>()
     private var pendingAcceptRecipient: String? = null
     private var answeringCallId: String? = null
     private var starting = false
@@ -69,6 +90,8 @@ class CallCenter(context: Context, private val client: RelayClient) {
 
     /** Own display name for the self-view fallback (CallUi.kt) when the local camera is off. */
     val myDisplayName: String? get() = client.me?.displayName
+    /** Own userId, for filtering self out of a group call's participant grid (CallUi.kt). */
+    val myUserId: String? get() = client.userId
 
     init {
         scope.launch { client.events.collect { e -> if (e is RelayEvent.Unknown) CallEvent.decode(e.event, e.payload)?.let { handle(it) } } }
@@ -107,12 +130,23 @@ class CallCenter(context: Context, private val client: RelayClient) {
     // disconnected if the user ignores it) — mirror the server's 2-minute ring timeout locally.
     private fun scheduleIncomingTimeout(callId: String) { ringJob?.cancel(); ringJob = scope.launch { delay(120_000); if (current?.id == callId && current?.phase == CallPhase.INCOMING) cleanup() } }
     private fun setCall(change: (ActiveCall?) -> ActiveCall?) = _state.update { it.copy(call = change(it.call)) }
-    private fun send(vararg pairs: Pair<String, Any?>) = client.sendFrame(buildJsonObject { pairs.forEach { (k, v) -> when (v) { null -> {}; is String -> put(k, v); is kotlinx.serialization.json.JsonElement -> put(k, v); else -> put(k, v.toString()) } } })
+    private fun send(vararg pairs: Pair<String, Any?>) = client.sendFrame(buildJsonObject { pairs.forEach { (k, v) -> when (v) { null -> {}; is String -> put(k, v); is JsonElement -> put(k, v); else -> put(k, v.toString()) } } })
     private fun sdpJson(s: SdpPayload) = buildJsonObject { put("type", s.type); put("sdp", s.sdp) }
 
+    /** Send a signaling frame for one specific peer — `targetUserId` is only attached for a group
+     *  call; a 1:1 frame stays exactly as it was before group calls existed (protocol/events.md). */
+    private fun sendSignal(event: String, payloadKey: String, callId: String, userId: String, payload: JsonElement) {
+        val pairs = mutableListOf<Pair<String, Any?>>("event" to event, "callId" to callId)
+        if (current?.isGroup == true) pairs.add("targetUserId" to userId)
+        pairs.add(payloadKey to payload)
+        send(*pairs.toTypedArray())
+    }
+
     fun start(conversation: Conversation, type: CallType) {
-        val peer = conversation.peer ?: return
         if (current != null || starting) return
+        val isGroup = conversation.isGroup
+        val peer = conversation.peer
+        if (!isGroup && peer == null) return
         starting = true
         scope.launch {
             try {
@@ -125,25 +159,53 @@ class CallCenter(context: Context, private val client: RelayClient) {
                     _state.update { it.copy(error = if (e.status == 409) "They're already on another call." else "Couldn't start the call. Please try again.") }; return@launch
                 } finally { starting = false }
                 val callId = res.callId
-                // Local state first: the callee may answer/decline during our permission prompt.
-                setCall { ActiveCall(callId, conversation.id, peer.userId, peer.displayName, type, CallPhase.OUTGOING) }
+                // For a group call the REST response has no participant list (server code never
+                // returns one for /calls) — the conversation's already-known member list is exactly
+                // who was just invited, so use that immediately rather than waiting on anything.
+                val me = client.userId
+                val participantIds = if (isGroup) (listOfNotNull(me) + conversation.members.map { it.userId }.filterNot { it == me }).distinct()
+                    else listOfNotNull(peer?.userId)
+                val displayPeerId = peer?.userId ?: participantIds.firstOrNull { it != me } ?: ""
+                // Local state first: the callee(s) may answer/decline during our permission prompt.
+                setCall { ActiveCall(callId, conversation.id, displayPeerId, peer?.displayName, type, CallPhase.OUTGOING, isGroup = isGroup, participantIds = participantIds) }
                 scheduleRing(callId)
-                val m = makeManager(callId)
-                try {
-                    val servers = iceServers()
+                if (!isGroup) {
+                    val m = makeManager(callId, displayPeerId)
+                    try {
+                        val lm = LocalMedia.acquire(appContext, type)
+                        val servers = iceServers()
+                        if (current?.id != callId) { m.close(); lm.close(); return@launch }
+                        localMedia = lm
+                        m.start(lm, servers)
+                    } catch (e: Exception) {
+                        m.close(); if (current?.id != callId) return@launch
+                        runCatching { client.api.endCall(callId, "failed") }
+                        _state.update { it.copy(error = "Couldn't start the call — check microphone/camera permissions.") }
+                        cleanup(); return@launch
+                    }
                     if (current?.id != callId) { m.close(); return@launch }
-                    m.start(type, servers)
-                } catch (e: Exception) {
-                    m.close(); if (current?.id != callId) return@launch
-                    runCatching { client.api.endCall(callId, "failed") }
-                    _state.update { it.copy(error = "Couldn't start the call — check microphone/camera permissions.") }
-                    cleanup(); return@launch
+                    peers[displayPeerId] = m
+                    _state.update { it.copy(localVideoTrack = localMedia?.videoTrack, speakerEnabled = type == CallType.VIDEO) }
+                    applySpeaker()
+                    pendingAcceptRecipient?.let { if (current?.phase == CallPhase.CONNECTING) { pendingAcceptRecipient = null; sendOffer(m, callId, displayPeerId) } }
+                } else {
+                    // A group call has nobody to offer to yet — only the caller has joined so far;
+                    // peer connections form once someone else joins and offers to us (see answer(),
+                    // "newest-joiner-initiates"). We still acquire local media eagerly so it's ready
+                    // the instant the first offer arrives.
+                    try {
+                        val lm = LocalMedia.acquire(appContext, type)
+                        if (current?.id != callId) { lm.close(); return@launch }
+                        localMedia = lm
+                        _state.update { it.copy(localVideoTrack = lm.videoTrack, speakerEnabled = type == CallType.VIDEO) }
+                        applySpeaker()
+                    } catch (e: Exception) {
+                        if (current?.id != callId) return@launch
+                        runCatching { client.api.endCall(callId, "failed") }
+                        _state.update { it.copy(error = "Couldn't start the call — check microphone/camera permissions.") }
+                        cleanup(); return@launch
+                    }
                 }
-                if (current?.id != callId) { m.close(); return@launch }
-                manager = m
-                _state.update { it.copy(localVideoTrack = m.localVideoTrack, speakerEnabled = type == CallType.VIDEO) }
-                applySpeaker()
-                pendingAcceptRecipient?.let { if (current?.phase == CallPhase.CONNECTING) { pendingAcceptRecipient = null; sendOffer(m, callId) } }
             } finally { starting = false }
         }
     }
@@ -163,24 +225,51 @@ class CallCenter(context: Context, private val client: RelayClient) {
                 // entire signaling exchange to a gateway channel we weren't subscribed to yet.
                 // Idempotent/instant if already connected.
                 runCatching { client.connect() }
-                client.api.answerCall(callId)
+                val answerRes = client.api.answerCallWithParticipants(callId)
                 if (current?.id != callId) return@launch
                 setCall { it?.copy(phase = CallPhase.CONNECTING) }
-                scheduleConnect(callId)
-                m = makeManager(callId)
-                val servers = iceServers()
-                if (current?.id != callId) { m.close(); return@launch }
-                m.start(cur.type, servers)
-                if (current?.id != callId) { m.close(); return@launch }
-                manager = m
-                _state.update { it.copy(localVideoTrack = m.localVideoTrack, speakerEnabled = cur.type == CallType.VIDEO) }
-                applySpeaker()
-                pendingOffer?.takeIf { it.first == callId }?.let { (_, sdp) ->
-                    pendingOffer = null
-                    val answer = m.createAnswer(sdp)
-                    if (current?.id == callId) send("event" to "call_answer_sdp", "callId" to callId, "sdp" to sdpJson(answer))
+                if (!cur.isGroup) {
+                    scheduleConnect(callId)
+                    m = makeManager(callId, cur.peerId)
+                    val mgr = m
+                    val lm = LocalMedia.acquire(appContext, cur.type)
+                    val servers = iceServers()
+                    if (current?.id != callId) { mgr.close(); lm.close(); return@launch }
+                    localMedia = lm
+                    mgr.start(lm, servers)
+                    if (current?.id != callId) { mgr.close(); return@launch }
+                    peers[cur.peerId] = mgr
+                    _state.update { it.copy(localVideoTrack = lm.videoTrack, speakerEnabled = cur.type == CallType.VIDEO) }
+                    applySpeaker()
+                    pendingOffer?.takeIf { it.first == callId }?.let { (_, sdp) ->
+                        pendingOffer = null
+                        val answer = mgr.createAnswer(sdp)
+                        if (current?.id == callId) sendSignal("call_answer_sdp", "sdp", callId, cur.peerId, sdpJson(answer))
+                    }
+                    drainCandidates(mgr, callId, cur.peerId)
+                } else {
+                    // Group call, newest-joiner-initiates: offer to every already-joined participant
+                    // (not us) — the ones who join AFTER us are responsible for offering to US.
+                    val lm = LocalMedia.acquire(appContext, cur.type)
+                    if (current?.id != callId) { lm.close(); return@launch }
+                    localMedia = lm
+                    _state.update { it.copy(localVideoTrack = lm.videoTrack, speakerEnabled = cur.type == CallType.VIDEO) }
+                    applySpeaker()
+                    val servers = iceServers()
+                    if (current?.id != callId) return@launch
+                    val myId = client.userId
+                    val already = answerRes.participants.filter { it.userId != myId && it.joinedAt != null && it.leftAt == null }
+                    for (p in already) {
+                        if (current?.id != callId) return@launch
+                        val pm = makeManager(callId, p.userId)
+                        peers[p.userId] = pm
+                        try {
+                            pm.start(lm, servers)
+                            val offer = pm.createOffer()
+                            if (current?.id == callId) sendSignal("call_offer", "sdp", callId, p.userId, sdpJson(offer))
+                        } catch (e: Exception) { peers.remove(p.userId); pm.close() }
+                    }
                 }
-                drainCandidates(m, callId)
             } catch (e: RelayException) {
                 m?.close(); if (current?.id == callId && e.status == 409) cleanup()
                 else if (current?.id == callId) { _state.update { it.copy(error = e.message) }; cleanup() }
@@ -197,12 +286,12 @@ class CallCenter(context: Context, private val client: RelayClient) {
     fun hangUp() { val cur = current ?: return; scope.launch { runCatching { if (cur.phase == CallPhase.INCOMING) client.api.declineCall(cur.id) else client.api.endCall(cur.id) } }; cleanup() }
     fun toggleMic() {
         _state.update { it.copy(micEnabled = !it.micEnabled) }
-        manager?.setMicEnabled(_state.value.micEnabled)
+        localMedia?.setMicEnabled(_state.value.micEnabled)
         current?.let { send("event" to "call_media_state", "callId" to it.id, "micEnabled" to JsonPrimitive(_state.value.micEnabled)) }
     }
     fun toggleCamera() {
         _state.update { it.copy(cameraEnabled = !it.cameraEnabled) }
-        manager?.setCameraEnabled(_state.value.cameraEnabled)
+        localMedia?.setCameraEnabled(_state.value.cameraEnabled)
         current?.let { send("event" to "call_media_state", "callId" to it.id, "cameraEnabled" to JsonPrimitive(_state.value.cameraEnabled)) }
     }
     fun toggleSpeaker() { _state.update { it.copy(speakerEnabled = !it.speakerEnabled) }; applySpeaker() }
@@ -211,38 +300,68 @@ class CallCenter(context: Context, private val client: RelayClient) {
     private suspend fun iceServers(): List<PeerConnectionManager.IceServer> =
         runCatching { client.api.turnCredentials() }.getOrNull()?.let { listOf(PeerConnectionManager.IceServer(it.urls, it.username, it.credential)) } ?: emptyList()
 
-    private fun makeManager(callId: String): PeerConnectionManager {
+    private fun makeManager(callId: String, userId: String): PeerConnectionManager {
         val m = PeerConnectionManager(appContext)
-        m.onIceCandidate = { c -> send("event" to "call_ice_candidate", "callId" to callId, "candidate" to buildJsonObject { put("candidate", c.candidate); c.sdpMid?.let { put("sdpMid", it) }; c.sdpMLineIndex?.let { put("sdpMLineIndex", it) } }) }
-        m.onRemoteVideoTrack = { t -> scope.launch { if (manager === m) _state.update { it.copy(remoteVideoTrack = t) } } }
+        m.onIceCandidate = { c -> sendSignal("call_ice_candidate", "candidate", callId, userId, buildJsonObject { put("candidate", c.candidate); c.sdpMid?.let { put("sdpMid", it) }; c.sdpMLineIndex?.let { put("sdpMLineIndex", it) } }) }
+        m.onRemoteVideoTrack = { t -> scope.launch {
+            if (peers[userId] !== m) return@launch
+            _state.update { st ->
+                val tracks = st.remoteVideoTracks + (userId to t)
+                st.copy(remoteVideoTracks = tracks, remoteVideoTrack = if (current?.isGroup == true) st.remoteVideoTrack else t)
+            }
+        } }
         m.onConnectionStateChange = { s -> scope.launch {
-            if (manager !== m || current?.id != callId) return@launch
+            if (peers[userId] !== m || current?.id != callId) return@launch
             when (s) {
-                PeerConnection.PeerConnectionState.CONNECTED -> { connectJob?.cancel(); graceJob?.cancel(); restartJob?.cancel(); graceJob = null; m.noteConnected(); setCall { it?.copy(phase = CallPhase.ACTIVE, startedAtMs = it.startedAtMs ?: System.currentTimeMillis()) }; applySpeaker() }
-                PeerConnection.PeerConnectionState.DISCONNECTED -> connectionLost(callId, false, m)
-                PeerConnection.PeerConnectionState.FAILED -> connectionLost(callId, true, m)
+                PeerConnection.PeerConnectionState.CONNECTED -> {
+                    val isGroup = current?.isGroup == true
+                    m.noteConnected()
+                    if (!isGroup) { connectJob?.cancel(); graceJob?.cancel(); restartJob?.cancel(); graceJob = null }
+                    else connectJob?.cancel()
+                    if (current?.phase != CallPhase.ACTIVE) setCall { it?.copy(phase = CallPhase.ACTIVE, startedAtMs = it.startedAtMs ?: System.currentTimeMillis()) }
+                    applySpeaker()
+                }
+                PeerConnection.PeerConnectionState.DISCONNECTED -> connectionLost(callId, false, m, userId)
+                PeerConnection.PeerConnectionState.FAILED -> connectionLost(callId, true, m, userId)
                 else -> {}
             }
         } }
         return m
     }
 
-    private fun sendOffer(m: PeerConnectionManager, callId: String) = scope.launch {
+    private fun sendOffer(m: PeerConnectionManager, callId: String, userId: String) = scope.launch {
         val offer = runCatching { m.createOffer() }.getOrNull() ?: return@launch
-        if (current?.id == callId) send("event" to "call_offer", "callId" to callId, "sdp" to sdpJson(offer))
+        if (current?.id == callId) sendSignal("call_offer", "sdp", callId, userId, sdpJson(offer))
     }
-    private fun drainCandidates(m: PeerConnectionManager, callId: String) { val mine = synchronized(pendingCandidates) { pendingCandidates.filter { it.first == callId }.also { pendingCandidates.clear() } }; mine.forEach { m.addRemoteIceCandidate(it.second) } }
+    private fun drainCandidates(m: PeerConnectionManager, callId: String, senderId: String) {
+        val mine = synchronized(pendingCandidates) {
+            val matched = pendingCandidates.filter { it.first == callId && it.second == senderId }
+            pendingCandidates.removeAll(matched)
+            matched
+        }
+        mine.forEach { m.addRemoteIceCandidate(it.third) }
+    }
 
-    private fun connectionLost(callId: String, failed: Boolean, m: PeerConnectionManager) {
+    private fun connectionLost(callId: String, failed: Boolean, m: PeerConnectionManager, userId: String) {
         val cur = current ?: return
         if (cur.id != callId) return
+        if (cur.isGroup) {
+            // A dropped peer just loses that one tile — it doesn't end the call for everyone
+            // (call_participant_left / call_end handle that); only give up on this leg once ICE
+            // restart is exhausted.
+            if (!m.canRestartIce) {
+                peers.remove(userId)?.close()
+                _state.update { it.copy(remoteVideoTracks = it.remoteVideoTracks - userId, remoteParticipantMedia = it.remoteParticipantMedia - userId) }
+            }
+            return
+        }
         if (cur.phase != CallPhase.ACTIVE && cur.phase != CallPhase.RECONNECTING) { if (failed && !m.canRestartIce) fail(callId, "Call failed to connect — check your network."); return }
         if (cur.phase == CallPhase.ACTIVE) setCall { it?.copy(phase = CallPhase.RECONNECTING) }
         if (graceJob == null) graceJob = scope.launch { delay(20_000); if (current?.id == callId && current?.phase == CallPhase.RECONNECTING) fail(callId, "Call dropped — check your network.") }
         if (!m.canRestartIce) return
         restartJob?.cancel()
         restartJob = scope.launch { if (!failed) delay(3_000); if (current?.id != callId || m.connectionState == PeerConnection.PeerConnectionState.CONNECTED) return@launch
-            runCatching { m.restartIce() }.getOrNull()?.let { send("event" to "call_offer", "callId" to callId, "sdp" to sdpJson(it)) } }
+            runCatching { m.restartIce() }.getOrNull()?.let { sendSignal("call_offer", "sdp", callId, userId, sdpJson(it)) } }
     }
 
     private fun fail(callId: String, message: String) { scope.launch { runCatching { client.api.endCall(callId, "failed") } }; _state.update { it.copy(error = message) }; cleanup() }
@@ -251,7 +370,8 @@ class CallCenter(context: Context, private val client: RelayClient) {
 
     private fun cleanup() {
         listOf(ringJob, connectJob, graceJob, restartJob).forEach { it?.cancel() }; ringJob = null; connectJob = null; graceJob = null; restartJob = null
-        manager?.close(); manager = null
+        peers.values.forEach { it.close() }; peers.clear()
+        localMedia?.close(); localMedia = null
         pendingOffer = null; synchronized(pendingCandidates) { pendingCandidates.clear() }; pendingAcceptRecipient = null; answeringCallId = null
         runCatching { audioManager.mode = AudioManager.MODE_NORMAL; @Suppress("DEPRECATION") audioManager.isSpeakerphoneOn = false }
         _state.update { CallState(error = it.error) }
@@ -260,21 +380,53 @@ class CallCenter(context: Context, private val client: RelayClient) {
     private fun handle(e: CallEvent) {
         val cur = current
         when (e) {
-            is CallEvent.Invite -> if (e.callerId != client.userId && cur == null) setCall { ActiveCall(e.callId, e.conversationId, e.callerId, e.callerName, e.type, CallPhase.INCOMING) }
+            is CallEvent.Invite -> if (e.callerId != client.userId && cur == null) setCall { ActiveCall(e.callId, e.conversationId, e.callerId, e.callerName, e.type, CallPhase.INCOMING, isGroup = e.isGroup, participantIds = e.participantIds) }
             is CallEvent.Accepted -> {
-                if (cur?.id == e.callId && cur.phase == CallPhase.INCOMING && e.acceptedBy == client.userId && answeringCallId != e.callId) { cleanup(); return }
-                if (cur?.id != e.callId || cur.phase != CallPhase.OUTGOING) return
+                // 1:1-only (a group call's per-member join uses call_participant_joined instead).
+                if (cur == null || cur.isGroup) return
+                if (cur.id == e.callId && cur.phase == CallPhase.INCOMING && e.acceptedBy == client.userId && answeringCallId != e.callId) { cleanup(); return }
+                if (cur.id != e.callId || cur.phase != CallPhase.OUTGOING) return
                 ringJob?.cancel()
                 setCall { it?.copy(phase = CallPhase.CONNECTING) }
                 scheduleConnect(e.callId)
-                val m = manager
-                if (m == null) pendingAcceptRecipient = e.acceptedBy else sendOffer(m, e.callId)
+                val m = peers[cur.peerId]
+                if (m == null) pendingAcceptRecipient = e.acceptedBy else sendOffer(m, e.callId, cur.peerId)
             }
-            is CallEvent.Offer -> { val m = manager; if (m == null || cur?.id != e.callId) { pendingOffer = e.callId to e.sdp; return }
-                scope.launch { val a = runCatching { m.createAnswer(e.sdp) }.getOrNull() ?: return@launch; if (current?.id == e.callId) send("event" to "call_answer_sdp", "callId" to e.callId, "sdp" to sdpJson(a)) } }
-            is CallEvent.AnswerSdp -> if (cur?.id == e.callId) scope.launch { runCatching { manager?.acceptAnswer(e.sdp) } }
-            is CallEvent.Ice -> { val m = manager; if (m != null && cur?.id == e.callId) m.addRemoteIceCandidate(e.candidate)
-                else if (cur == null || cur.id == e.callId) synchronized(pendingCandidates) { if (pendingCandidates.size < 64) pendingCandidates.add(e.callId to e.candidate) } }
+            is CallEvent.Offer -> {
+                val senderId = e.senderId ?: return
+                val existing = peers[senderId]
+                if (existing != null) {
+                    scope.launch { val a = runCatching { existing.createAnswer(e.sdp) }.getOrNull() ?: return@launch; if (current?.id == e.callId) sendSignal("call_answer_sdp", "sdp", e.callId, senderId, sdpJson(a)) }
+                    return
+                }
+                if (cur?.isGroup == true && cur.id == e.callId) {
+                    // Newest-joiner-initiates growth: the first call_offer from a sender we've never
+                    // seen means someone new joined and is offering to us — create their manager now.
+                    val lm = localMedia ?: return
+                    scope.launch {
+                        val servers = iceServers()
+                        if (current?.id != e.callId || peers.containsKey(senderId)) return@launch
+                        val m = makeManager(e.callId, senderId)
+                        peers[senderId] = m
+                        try {
+                            m.start(lm, servers)
+                            val a = m.createAnswer(e.sdp)
+                            if (current?.id == e.callId) sendSignal("call_answer_sdp", "sdp", e.callId, senderId, sdpJson(a))
+                            drainCandidates(m, e.callId, senderId)
+                        } catch (ex: Exception) { peers.remove(senderId); m.close() }
+                    }
+                    return
+                }
+                // 1:1: no manager yet (still ringing, before answer() runs) — buffer for drainPending().
+                if (cur == null || cur.id == e.callId) pendingOffer = e.callId to e.sdp
+            }
+            is CallEvent.AnswerSdp -> { val senderId = e.senderId ?: return; if (cur?.id == e.callId) scope.launch { runCatching { peers[senderId]?.acceptAnswer(e.sdp) } } }
+            is CallEvent.Ice -> {
+                val senderId = e.senderId ?: return
+                val m = peers[senderId]
+                if (m != null && cur?.id == e.callId) m.addRemoteIceCandidate(e.candidate)
+                else if (cur == null || cur.id == e.callId) synchronized(pendingCandidates) { if (pendingCandidates.size < 64) pendingCandidates.add(Triple(e.callId, senderId, e.candidate)) }
+            }
             is CallEvent.Declined -> if (cur?.id == e.callId) cleanup()
             is CallEvent.Missed -> if (cur?.id == e.callId) cleanup()
             is CallEvent.Ended -> if (cur?.id == e.callId) cleanup()
@@ -282,12 +434,28 @@ class CallCenter(context: Context, private val client: RelayClient) {
                 // Each toggle sends only the ONE field that changed — the other is null on this
                 // event, not false — so each side is applied independently or a mic-only update
                 // would wrongly stomp remoteCameraEnabled (or vice versa).
-                _state.update {
-                    it.copy(
-                        remoteCameraEnabled = e.cameraEnabled ?: it.remoteCameraEnabled,
-                        remoteMicEnabled = e.micEnabled ?: it.remoteMicEnabled,
-                    )
+                if (cur.isGroup) {
+                    val senderId = e.senderId ?: return
+                    _state.update { st ->
+                        val prev = st.remoteParticipantMedia[senderId] ?: RemoteParticipantMedia()
+                        val next = prev.copy(cameraEnabled = e.cameraEnabled ?: prev.cameraEnabled, micEnabled = e.micEnabled ?: prev.micEnabled)
+                        st.copy(remoteParticipantMedia = st.remoteParticipantMedia + (senderId to next))
+                    }
+                } else {
+                    _state.update {
+                        it.copy(
+                            remoteCameraEnabled = e.cameraEnabled ?: it.remoteCameraEnabled,
+                            remoteMicEnabled = e.micEnabled ?: it.remoteMicEnabled,
+                        )
+                    }
                 }
+            }
+            is CallEvent.ParticipantJoined -> if (cur?.id == e.callId) setCall { it?.copy(participantIds = e.participantIds) }
+            is CallEvent.ParticipantDeclined -> if (cur?.id == e.callId) setCall { it?.copy(participantIds = it.participantIds.filter { id -> id != e.userId }) }
+            is CallEvent.ParticipantLeft -> if (cur?.id == e.callId) {
+                peers.remove(e.userId)?.close()
+                _state.update { it.copy(remoteVideoTracks = it.remoteVideoTracks - e.userId, remoteParticipantMedia = it.remoteParticipantMedia - e.userId) }
+                setCall { it?.copy(participantIds = it.participantIds.filter { id -> id != e.userId }) }
             }
         }
     }

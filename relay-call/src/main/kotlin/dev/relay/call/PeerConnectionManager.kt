@@ -42,8 +42,58 @@ object RelayWebRtc {
 }
 
 /**
- * One PeerConnection for one 1:1 call — same shape as the iOS/web managers: candidates queued
- * until the remote description exists, ICE restart by the offerer, mic/camera toggles.
+ * The local mic/camera, acquired ONCE per call and shared across every PeerConnectionManager for
+ * that call — a group call has one `LocalMedia` and N-1 PeerConnectionManagers, each adding these
+ * SAME tracks to its own PeerConnection (WebRTC tracks can be attached to multiple connections at
+ * once; that's the whole mesh trick). A 1:1 call is just the N=1 case of the same thing.
+ *
+ * Acquisition is best-effort per track, same resilience as before: a device with no working
+ * microphone (or one grabbed by another app) shouldn't kill the whole call — remaining peers still
+ * connect and this side can listen/watch even while contributing no media of its own.
+ */
+class LocalMedia private constructor(
+    val audioTrack: AudioTrack?,
+    val videoTrack: VideoTrack?,
+    private val capturer: CameraVideoCapturer?,
+    private val surfaceHelper: SurfaceTextureHelper?,
+) {
+    fun setMicEnabled(enabled: Boolean) { audioTrack?.setEnabled(enabled) }
+    fun setCameraEnabled(enabled: Boolean) { videoTrack?.setEnabled(enabled) }
+    fun close() {
+        runCatching { capturer?.stopCapture() }; capturer?.dispose()
+        surfaceHelper?.dispose()
+    }
+
+    companion object {
+        fun acquire(context: Context, type: CallType): LocalMedia {
+            RelayWebRtc.ensure(context)
+            var audio: AudioTrack? = null
+            try { audio = RelayWebRtc.factory.createAudioTrack("audio0", RelayWebRtc.factory.createAudioSource(MediaConstraints())) }
+            catch (_: Exception) { /* listen-only on this side */ }
+            var video: VideoTrack? = null; var capturer: CameraVideoCapturer? = null; var helper: SurfaceTextureHelper? = null
+            if (type == CallType.VIDEO) try {
+                val enumerator = Camera2Enumerator(context)
+                val device = enumerator.deviceNames.firstOrNull { enumerator.isFrontFacing(it) } ?: enumerator.deviceNames.firstOrNull()
+                if (device != null) {
+                    val source = RelayWebRtc.factory.createVideoSource(false)
+                    helper = SurfaceTextureHelper.create("relay-capture", RelayWebRtc.eglBase.eglBaseContext)
+                    val cap = enumerator.createCapturer(device, null)
+                    cap.initialize(helper, context, source.capturerObserver)
+                    cap.startCapture(1280, 720, 30)
+                    capturer = cap
+                    video = RelayWebRtc.factory.createVideoTrack("video0", source)
+                }
+            } catch (_: Exception) { /* audio/listen-only on this side */ }
+            return LocalMedia(audio, video, capturer, helper)
+        }
+    }
+}
+
+/**
+ * One PeerConnection for one remote participant — same shape as the iOS/web managers: candidates
+ * queued until the remote description exists, ICE restart by the offerer, mic/camera toggles. For
+ * a group call, CallCenter creates one of these per remote participant, all sharing the same
+ * [LocalMedia] (see that class's doc for why this is exactly how a mesh call works).
  */
 class PeerConnectionManager(private val context: Context) {
     class IceServer(val urls: List<String>, val username: String?, val credential: String?)
@@ -52,10 +102,6 @@ class PeerConnectionManager(private val context: Context) {
     var onRemoteVideoTrack: ((VideoTrack) -> Unit)? = null
 
     private var pc: PeerConnection? = null
-    private var audioTrack: AudioTrack? = null
-    var localVideoTrack: VideoTrack? = null; private set
-    private var capturer: CameraVideoCapturer? = null
-    private var surfaceHelper: SurfaceTextureHelper? = null
     private val pendingCandidates = mutableListOf<IceCandidate>()
     @Volatile private var remoteDescriptionSet = false
     var isOfferer = false; private set
@@ -63,7 +109,8 @@ class PeerConnectionManager(private val context: Context) {
     val connectionState get() = pc?.connectionState()
     val canRestartIce get() = pc != null && isOfferer && iceRestarts < 3
 
-    fun start(type: CallType, iceServers: List<IceServer>) {
+    /** Attach the (shared, already-acquired) local media and open the PeerConnection. */
+    fun start(localMedia: LocalMedia, iceServers: List<IceServer>) {
         RelayWebRtc.ensure(context)
         val servers = if (iceServers.isEmpty()) listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
             else iceServers.map { s -> PeerConnection.IceServer.builder(s.urls).apply { s.username?.let { setUsername(it) }; s.credential?.let { setPassword(it) } }.createIceServer() }
@@ -83,24 +130,8 @@ class PeerConnectionManager(private val context: Context) {
             override fun onRenegotiationNeeded() {}
         }) ?: throw IllegalStateException("createPeerConnection failed")
         pc = connection
-        val audio = RelayWebRtc.factory.createAudioTrack("audio0", RelayWebRtc.factory.createAudioSource(MediaConstraints()))
-        audioTrack = audio
-        connection.addTrack(audio, listOf("stream0"))
-        if (type == CallType.VIDEO) {
-            val enumerator = Camera2Enumerator(context)
-            val device = enumerator.deviceNames.firstOrNull { enumerator.isFrontFacing(it) } ?: enumerator.deviceNames.firstOrNull()
-            if (device != null) {
-                val source = RelayWebRtc.factory.createVideoSource(false)
-                val helper = SurfaceTextureHelper.create("relay-capture", RelayWebRtc.eglBase.eglBaseContext)
-                val cap = enumerator.createCapturer(device, null)
-                cap.initialize(helper, context, source.capturerObserver)
-                cap.startCapture(1280, 720, 30)
-                capturer = cap; surfaceHelper = helper
-                val video = RelayWebRtc.factory.createVideoTrack("video0", source)
-                localVideoTrack = video
-                connection.addTrack(video, listOf("stream0"))
-            }
-        }
+        localMedia.audioTrack?.let { runCatching { connection.addTrack(it, listOf("stream0")) } }
+        localMedia.videoTrack?.let { runCatching { connection.addTrack(it, listOf("stream0")) } }
     }
 
     private suspend fun create(offer: Boolean, restart: Boolean = false): SessionDescription {
@@ -159,13 +190,10 @@ class PeerConnectionManager(private val context: Context) {
         if (pc == null || !remoteDescriptionSet) { synchronized(pendingCandidates) { pendingCandidates.add(c) }; return }
         pc.addIceCandidate(c)
     }
-    fun setMicEnabled(enabled: Boolean) { audioTrack?.setEnabled(enabled) }
-    fun setCameraEnabled(enabled: Boolean) { localVideoTrack?.setEnabled(enabled) }
+    // Mic/camera toggling happens once at the CallCenter level, directly on the shared LocalMedia's
+    // tracks — the same track is attached to every peer's PeerConnection (see LocalMedia's doc).
     fun close() {
-        runCatching { capturer?.stopCapture() }; capturer?.dispose(); capturer = null
-        surfaceHelper?.dispose(); surfaceHelper = null
         pc?.close(); pc?.dispose(); pc = null
-        audioTrack = null; localVideoTrack = null
         synchronized(pendingCandidates) { pendingCandidates.clear() }
         remoteDescriptionSet = false
     }

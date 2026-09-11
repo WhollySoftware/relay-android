@@ -32,9 +32,26 @@ class CallEventTest {
 
     @Test fun `media state — only the changed field is present`() {
         val cameraOnly = decode("""{"event":"call_media_state","callId":"1","senderId":"alice","cameraEnabled":false}""") as CallEvent.MediaState
-        assertEquals(CallEvent.MediaState("1", false, null), cameraOnly)
+        assertEquals(CallEvent.MediaState("1", "alice", false, null), cameraOnly)
         val micOnly = decode("""{"event":"call_media_state","callId":"1","senderId":"alice","micEnabled":false}""") as CallEvent.MediaState
-        assertEquals(CallEvent.MediaState("1", null, false), micOnly)
+        assertEquals(CallEvent.MediaState("1", "alice", null, false), micOnly)
         assertNull(decode("""{"event":"call_media_state"}"""))
+    }
+
+    @Test fun `group call events`() {
+        val invite = decode("""{"event":"call_invite","callId":"1","conversationId":"7","callerId":"alice","callerName":"Alice","isGroup":true,"participantIds":["alice","bob","carol"],"type":"video"}""") as CallEvent.Invite
+        assertEquals(CallEvent.Invite("1", "7", "alice", "Alice", CallType.VIDEO, true, listOf("alice", "bob", "carol")), invite)
+
+        val offer = decode("""{"event":"call_offer","callId":"1","senderId":"alice","targetUserId":"bob","sdp":{"type":"offer","sdp":"v=0"}}""") as CallEvent.Offer
+        assertEquals("bob", offer.targetUserId); assertEquals("alice", offer.senderId)
+
+        val joined = decode("""{"event":"call_participant_joined","callId":"1","conversationId":"7","userId":"bob","participantIds":["alice","bob"]}""") as CallEvent.ParticipantJoined
+        assertEquals(CallEvent.ParticipantJoined("1", "7", "bob", listOf("alice", "bob")), joined)
+
+        val declined = decode("""{"event":"call_participant_declined","callId":"1","conversationId":"7","userId":"carol"}""") as CallEvent.ParticipantDeclined
+        assertEquals(CallEvent.ParticipantDeclined("1", "7", "carol"), declined)
+
+        val left = decode("""{"event":"call_participant_left","callId":"1","conversationId":"7","userId":"bob","remaining":2}""") as CallEvent.ParticipantLeft
+        assertEquals(CallEvent.ParticipantLeft("1", "7", "bob", 2), left)
     }
 }
