@@ -91,7 +91,7 @@ import java.time.format.DateTimeFormatter
  *     RelayChat(client = relay)
  */
 @Composable
-fun RelayChat(client: RelayClient, modifier: Modifier = Modifier) {
+fun RelayChat(client: RelayClient, modifier: Modifier = Modifier, onPickGroupMembers: (suspend () -> List<String>?)? = null) {
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
     val connection by client.connection.collectAsStateWithLifecycle()
     LaunchedEffect(client) { runCatching { client.connect() } }
@@ -105,7 +105,7 @@ fun RelayChat(client: RelayClient, modifier: Modifier = Modifier) {
         }
         val id = selected
         if (id == null) ConversationList(client, onSelect = { selected = it.id })
-        else MessageThread(client, conversationId = id, onBack = { selected = null })
+        else MessageThread(client, conversationId = id, onBack = { selected = null }, onPickGroupMembers = onPickGroupMembers)
     }
 }
 
@@ -155,7 +155,14 @@ fun ConversationRow(c: Conversation, state: ChatSnapshot, myUserId: String?, onC
 }
 
 @Composable
-fun MessageThread(client: RelayClient, conversationId: String, onBack: (() -> Unit)? = null, headerActions: @Composable (Conversation) -> Unit = {}, modifier: Modifier = Modifier) {
+fun MessageThread(
+    client: RelayClient,
+    conversationId: String,
+    onBack: (() -> Unit)? = null,
+    headerActions: @Composable (Conversation) -> Unit = {},
+    modifier: Modifier = Modifier,
+    onPickGroupMembers: (suspend () -> List<String>?)? = null,
+) {
     val state by client.chat.state.collectAsStateWithLifecycle()
     val thread = state.thread(conversationId)
     val conversation = state.conversation(conversationId)
@@ -164,6 +171,7 @@ fun MessageThread(client: RelayClient, conversationId: String, onBack: (() -> Un
     var replyTo by remember { mutableStateOf<Message?>(null) }
     var forwarding by remember { mutableStateOf<Message?>(null) }
     var scrolledInitiallyFor by remember { mutableStateOf<String?>(null) }
+    var showGroupDetail by rememberSaveable { mutableStateOf(false) }
     // Driven off scroll state rather than intercepting touch input, so it doesn't fight the
     // message bubbles' own tap-to-reply/long-press gestures — only a real fling/drag hides the
     // keyboard, not a plain tap on the list.
@@ -200,6 +208,16 @@ fun MessageThread(client: RelayClient, conversationId: String, onBack: (() -> Un
     // pinned: the header is a fixed-height first child, so when the keyboard eats into this
     // Column's available height only the LazyColumn (weight(1f)) and composer below it shrink —
     // without it the whole screen (header included) got pushed up by the OS's window resize.
+    if (showGroupDetail && conversation != null && conversation.isGroup) {
+        GroupDetailScreen(
+            client = client,
+            conversation = conversation,
+            onBack = { showGroupDetail = false },
+            onPickAdd = onPickGroupMembers,
+            modifier = modifier.fillMaxSize(),
+        )
+        return
+    }
     Column(modifier.fillMaxSize().imePadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
@@ -210,7 +228,9 @@ fun MessageThread(client: RelayClient, conversationId: String, onBack: (() -> Un
                 }
                 Spacer(Modifier.width(10.dp))
             }
-            Column(Modifier.weight(1f)) {
+            Column(
+                Modifier.weight(1f).let { m -> if (conversation?.isGroup == true) m.clickable { showGroupDetail = true } else m },
+            ) {
                 Text(conversation?.title ?: "", fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val sub = if (conversation?.isGroup == true) "${conversation.memberCount} members" else if (conversation?.peer?.isOnline == true) "Online" else "Offline"
                 Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

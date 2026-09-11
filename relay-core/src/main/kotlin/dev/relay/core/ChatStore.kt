@@ -95,6 +95,8 @@ class ChatStore internal constructor(private val api: RelayApi, private val sock
     suspend fun updateGroup(id: String, name: String? = null, photoUrl: String? = null): Conversation = api.updateGroup(id, name, photoUrl).also { upsert(it) }
     suspend fun addMembers(id: String, userIds: List<String>) { api.addMembers(id, userIds); refreshConversation(id) }
     suspend fun removeMember(id: String, userId: String) { api.removeMember(id, userId); refreshConversation(id) }
+    /** Full participant list + who created the group — used by the "Group info" screen. */
+    suspend fun getParticipants(id: String): RelayApi.ParticipantsResponse = api.participants(id)
     suspend fun deleteConversation(id: String) { api.deleteConversation(id); remove(id) }
     suspend fun clearHistory(id: String) { api.clearHistory(id); clearThread(id) }
 
