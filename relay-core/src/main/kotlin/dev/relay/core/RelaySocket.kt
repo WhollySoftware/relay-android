@@ -82,6 +82,8 @@ class RelaySocket(private val config: RelayConfig, private val tokens: TokenSour
     private fun open() {
         if (!wantOpen) return
         setState(_state.value.copy(state = if (everConnected) ConnectionState.RECONNECTING else ConnectionState.CONNECTING))
+        val wsUrl = (config.webSocketUrl ?: config.baseUrl).trimEnd('/').replaceFirst(Regex("^http"), "ws")
+        config.debugLog { "[relay] connecting to ${redactedHost(wsUrl)}" }
         scope.launch {
             val token = try { tokens.get() } catch (e: Exception) { scheduleReconnect(e.message ?: "token error"); return@launch }
             if (!wantOpen) return@launch
@@ -94,6 +96,7 @@ class RelaySocket(private val config: RelayConfig, private val tokens: TokenSour
                     val obj = runCatching { RelayJson.json.parseToJsonElement(text).let { it as JsonObject } }.getOrNull() ?: return
                     val event = RelayEvent.decode(obj) ?: return
                     if (event is RelayEvent.Connected) markOpen(webSocket)
+                    config.debugLog { "[relay] event: ${eventLogName(event)}" }
                     _signals.tryEmit(Signal.Event(event))
                 }
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = handleClose(webSocket, code, reason)
@@ -108,6 +111,7 @@ class RelaySocket(private val config: RelayConfig, private val tokens: TokenSour
         val wasReconnect = everConnected
         everConnected = true
         setState(ConnectionSnapshot(ConnectionState.CONNECTED))
+        config.debugLog { "[relay] connected" }
         startPing(socket)
         val waiters = synchronized(openWaiters) { openWaiters.toList().also { openWaiters.clear() } }
         waiters.forEach { it.complete(Unit) }
@@ -119,6 +123,7 @@ class RelaySocket(private val config: RelayConfig, private val tokens: TokenSour
         if (ws !== socket) return
         ws = null
         pingJob?.cancel()
+        config.debugLog { "[relay] disconnected (code=$code, reason=${reason.ifBlank { "none" }})" }
         _signals.tryEmit(Signal.Disconnected(code))
         if (!wantOpen) return
         if (code == 4401 || code == 4403) scope.launch { runCatching { tokens.refresh() } }

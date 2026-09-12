@@ -14,6 +14,19 @@ data class RelayUser(
     val lastSeenAt: String? = null,
 )
 
+/** Per-project module gating, returned alongside `user` from GET /users/me. A host that does
+ *  nothing (older service without this field, or a project with nothing disabled) sees every
+ *  module enabled — the defaults below match today's fully-open behavior. */
+@Serializable
+data class RelayModules(
+    val chat: Boolean = true,
+    val audioCalls: Boolean = true,
+    val videoCalls: Boolean = true,
+    val chatAttachments: Boolean = true,
+    val chatVoiceMessages: Boolean = true,
+    val push: Boolean = true,
+)
+
 @Serializable
 data class GroupMember(val userId: String, val displayName: String? = null, val avatarUrl: String? = null, val isOnline: Boolean = false)
 
@@ -148,6 +161,15 @@ data class RelayConfig(
     val pingIntervalMs: Long = 25_000,
     val maxBackoffMs: Long = 30_000,
     val logger: ((String) -> Unit)? = null,
+    /**
+     * Opt-in verbose diagnostic logging. When `true` AND [logger] is non-null, the SDK emits
+     * connection lifecycle, REST request/response, gateway event, and call lifecycle lines through
+     * [logger] — see RelayDebugLog.kt. Redaction is designed in from the start: these lines never
+     * include auth tokens, TURN credentials, message content/attachment URLs, or user display
+     * names/avatars. Defaults to `false`, which is fully backward compatible with prior behavior
+     * (only the two existing minimal connection/reconnect messages fire).
+     */
+    val debug: Boolean = false,
 ) {
     companion object {
         fun withStaticToken(baseUrl: String, publicKey: String, token: String) = RelayConfig(baseUrl, publicKey, { token })

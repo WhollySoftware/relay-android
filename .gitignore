@@ -1,4 +1,20 @@
+node_modules/
+dist/
 build/
-.gradle/
-local.properties
-*/build/
+.env
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# web demo: per-machine Relay project keys (contains the secret key)
+sample-apps/web-demo/.relay-project.json
+
+# service: uploaded chat media (images/audio/files saved to disk — see lib/mediaStorage.js),
+# per-deployment data, never checked in
+service/uploads/
+
+# SwiftPM / Xcode
+.build/
+DerivedData/
+*.xcuserstate

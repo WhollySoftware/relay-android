@@ -14,8 +14,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -39,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import dev.relay.core.Conversation
+import dev.relay.core.LocalRelayIcons
 import dev.relay.core.Message
 import dev.relay.core.RelayApi
 import dev.relay.core.RelayClient
@@ -61,6 +60,9 @@ fun MessageInfoScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Plain non-null default (see RelayIcons.kt) — safe regardless of caller; a nested
+    // sub-screen reached via MessageThread, not a top-level entry point.
+    val icons = LocalRelayIcons.current
     var receipts by remember(message.id) { mutableStateOf<RelayApi.MessageReceiptsResponse?>(null) }
     var error by remember(message.id) { mutableStateOf<String?>(null) }
 
@@ -81,7 +83,7 @@ fun MessageInfoScreen(
 
     Column(modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerLowest)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+            IconButton(onClick = onBack) { Icon(icons.back, "Back") }
             Text("Message info", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
             Spacer(Modifier.width(48.dp))
         }

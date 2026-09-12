@@ -20,14 +20,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Logout
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.NotificationsOff
-import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -55,8 +47,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.relay.core.Conversation
+import dev.relay.core.LocalRelayIcons
 import dev.relay.core.Participant
 import dev.relay.core.RelayClient
+import dev.relay.core.RelayUser
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -72,8 +66,13 @@ fun GroupDetailScreen(
     conversation: Conversation,
     onBack: () -> Unit,
     onPickAdd: (suspend () -> List<String>?)? = null,
+    onSearchPeople: (suspend (query: String) -> List<RelayUser>)? = null,
     modifier: Modifier = Modifier,
 ) {
+    // Plain non-null default (see RelayIcons.kt) — safe regardless of caller; GroupDetailScreen
+    // is a nested sub-screen reached via MessageThread, not a top-level entry point, so it has no
+    // `icons` param of its own and just reads whatever's ambient (or the default).
+    val icons = LocalRelayIcons.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var participants by remember(conversation.id) { mutableStateOf<List<Participant>?>(null) }
@@ -90,6 +89,7 @@ fun GroupDetailScreen(
     var confirmLeave by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
     var showMedia by remember { mutableStateOf(false) }
+    var showAddParticipants by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
     var editName by remember { mutableStateOf(conversation.name ?: "") }
     var editPhoto by remember { mutableStateOf(conversation.photoUrl) }
@@ -205,10 +205,21 @@ fun GroupDetailScreen(
         MediaGalleryScreen(client = client, conversationId = conversation.id, onBack = { showMedia = false }, modifier = modifier)
         return
     }
+    if (showAddParticipants && onSearchPeople != null) {
+        AddParticipantsScreen(
+            client = client,
+            conversation = conversation,
+            onSearchPeople = onSearchPeople,
+            onDismiss = { showAddParticipants = false },
+            onAdded = { load() },
+            modifier = modifier,
+        )
+        return
+    }
 
     Column(modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerLowest)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+            IconButton(onClick = onBack) { Icon(icons.back, "Back") }
             Text("Group info", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
             Spacer(Modifier.width(48.dp))
         }
@@ -265,21 +276,21 @@ fun GroupDetailScreen(
             }
             item {
                 GroupedCard {
-                    ActionRow(icon = Icons.Filled.Photo, label = "Media, links & docs", onClick = { showMedia = true }, trailing = {
-                        Icon(Icons.Filled.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    ActionRow(icon = icons.photo, label = "Media, links & docs", onClick = { showMedia = true }, trailing = {
+                        Icon(icons.chevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     })
                     RowDivider()
                     ActionRow(
-                        icon = Icons.Filled.NotificationsOff,
+                        icon = icons.muteNotifications,
                         label = "Mute notifications",
                         onClick = { if (!muteBusy) handleToggleMute() },
                         trailing = { Switch(checked = conv.muted, onCheckedChange = { if (!muteBusy) handleToggleMute() }, enabled = !muteBusy) },
                     )
                     RowDivider()
-                    ActionRow(icon = Icons.Filled.Delete, label = "Clear chat", onClick = { confirmClear = true }, enabled = !clearBusy, color = MaterialTheme.colorScheme.error)
+                    ActionRow(icon = icons.delete, label = "Clear chat", onClick = { confirmClear = true }, enabled = !clearBusy, color = MaterialTheme.colorScheme.error)
                     RowDivider()
                     ActionRow(
-                        icon = Icons.AutoMirrored.Filled.Logout,
+                        icon = icons.leaveGroup,
                         label = "Leave group",
                         onClick = { confirmLeave = true },
                         enabled = !leaveBusy,
@@ -289,8 +300,21 @@ fun GroupDetailScreen(
             }
             item {
                 GroupedCard {
-                    if (isAdmin && onPickAdd != null) {
-                        ActionRow(icon = Icons.Filled.Add, label = if (addingBusy) "Adding…" else "Add people", onClick = { if (!addingBusy) handleAdd() }, enabled = !addingBusy, color = MaterialTheme.colorScheme.primary, circleColor = MaterialTheme.colorScheme.primaryContainer)
+                    if (isAdmin && (onSearchPeople != null || onPickAdd != null)) {
+                        ActionRow(
+                            icon = icons.addPeople,
+                            label = if (addingBusy) "Adding…" else "Add people",
+                            onClick = {
+                                // Rich onSearchPeople callback wins: it opens the SDK-owned picker
+                                // screen. Only the older raw onPickAdd callback falls back to
+                                // today's behavior of calling it directly.
+                                if (onSearchPeople != null) showAddParticipants = true
+                                else if (!addingBusy) handleAdd()
+                            },
+                            enabled = !addingBusy,
+                            color = MaterialTheme.colorScheme.primary,
+                            circleColor = MaterialTheme.colorScheme.primaryContainer,
+                        )
                         RowDivider()
                     }
                     if (participants == null) {

@@ -40,6 +40,8 @@ class RelayApi(private val config: RelayConfig, internal val tokens: TokenSource
 
     suspend fun <T> request(method: String, path: String, body: String? = null, serializer: KSerializer<T>, retryOn401: Boolean = true): T =
         withContext(Dispatchers.IO) {
+            val logPath = path.substringBefore('?')
+            config.debugLog { "[relay] -> $method $logPath" }
             val token = tokens.get()
             val builder = Request.Builder().url(base + path)
                 .header("X-Relay-Key", config.publicKey)
@@ -48,8 +50,12 @@ class RelayApi(private val config: RelayConfig, internal val tokens: TokenSource
             val req = builder
                 .method(method, body?.toRequestBody(jsonType) ?: if (method == "GET") null else "".toRequestBody(null))
                 .build()
-            val response = try { http.newCall(req).execute() } catch (e: java.io.IOException) { throw RelayException(0, "network", e.message ?: "network error") }
+            val response = try { http.newCall(req).execute() } catch (e: java.io.IOException) {
+                config.debugLog { "[relay] <- $method $logPath error: ${e.javaClass.simpleName} ${redactedUrl(e.message ?: "")}" }
+                throw RelayException(0, "network", e.message ?: "network error")
+            }
             response.use { res ->
+                config.debugLog { "[relay] <- $method $logPath ${res.code}" }
                 val text = res.body?.string().orEmpty()
                 if (res.code == 401 && retryOn401) {
                     tokens.refresh()
@@ -65,7 +71,7 @@ class RelayApi(private val config: RelayConfig, internal val tokens: TokenSource
 
     private fun enc(v: String) = URLEncoder.encode(v, "UTF-8")
 
-    @Serializable private data class UserEnv(val user: RelayUser)
+    @Serializable private data class UserEnv(val user: RelayUser, val modules: RelayModules = RelayModules())
     @Serializable private data class UsersEnv(val users: List<RelayUser>)
     @Serializable private data class ConvEnv(val conversation: Conversation)
     @Serializable private data class ConvsEnv(val conversations: List<Conversation>)
@@ -82,6 +88,11 @@ class RelayApi(private val config: RelayConfig, internal val tokens: TokenSource
     @Serializable private data class ReceiptsEnv(val receipts: List<ReadReceipt>)
 
     suspend fun me(): RelayUser = request("GET", "/users/me", serializer = UserEnv.serializer()).user
+
+    /** Same call as [me], but also returns the project's module-gating flags (sibling `modules`
+     *  field). Defaults to all-enabled when the service doesn't return it yet. */
+    suspend fun meWithModules(): Pair<RelayUser, RelayModules> =
+        request("GET", "/users/me", serializer = UserEnv.serializer()).let { it.user to it.modules }
     suspend fun users(ids: List<String>): List<RelayUser> =
         if (ids.isEmpty()) emptyList() else request("GET", "/users?ids=${enc(ids.joinToString(","))}", serializer = UsersEnv.serializer()).users
 

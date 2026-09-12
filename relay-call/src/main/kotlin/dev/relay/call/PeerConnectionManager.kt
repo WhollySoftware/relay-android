@@ -111,6 +111,12 @@ class PeerConnectionManager(private val context: Context) {
     var onRemoteVideoTrack: ((VideoTrack) -> Unit)? = null
 
     private var pc: PeerConnection? = null
+    // This peer's incoming audio — kept so setLocalMute(_:) can silence it for THIS device only
+    // (disabling the receiving track never reaches the network, so nobody else's call is
+    // affected — see CallCenter.toggleLocalMute).
+    private var remoteAudioTrack: AudioTrack? = null
+    private var locallyMuted = false
+    fun setLocalMute(muted: Boolean) { locallyMuted = muted; remoteAudioTrack?.setEnabled(!muted) }
     private val pendingCandidates = mutableListOf<IceCandidate>()
     @Volatile private var remoteDescriptionSet = false
     var isOfferer = false; private set
@@ -127,7 +133,10 @@ class PeerConnectionManager(private val context: Context) {
         val connection = RelayWebRtc.factory.createPeerConnection(config, object : PeerConnection.Observer {
             override fun onIceCandidate(c: IceCandidate) { onIceCandidate?.invoke(IceCandidatePayload(c.sdp, c.sdpMid, c.sdpMLineIndex)) }
             override fun onConnectionChange(newState: PeerConnection.PeerConnectionState) { onConnectionStateChange?.invoke(newState) }
-            override fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>) { (receiver.track() as? VideoTrack)?.let { onRemoteVideoTrack?.invoke(it) } }
+            override fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>) {
+                (receiver.track() as? VideoTrack)?.let { onRemoteVideoTrack?.invoke(it) }
+                (receiver.track() as? AudioTrack)?.let { remoteAudioTrack = it; it.setEnabled(!locallyMuted) }
+            }
             override fun onSignalingChange(p0: PeerConnection.SignalingState) {}
             override fun onIceConnectionChange(p0: PeerConnection.IceConnectionState) {}
             override fun onIceConnectionReceivingChange(p0: Boolean) {}

@@ -9,6 +9,8 @@ import dev.relay.core.Conversation
 import dev.relay.core.RelayClient
 import dev.relay.core.RelayEvent
 import dev.relay.core.RelayException
+import dev.relay.core.debugLog
+import dev.relay.core.redactedUrl
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,6 +58,10 @@ data class CallState(
     val remoteCameraEnabled: Boolean = true,
     /** Per-participant mic/camera, for a group call. Empty for 1:1 — use the scalars above. */
     val remoteParticipantMedia: Map<String, RemoteParticipantMedia> = emptyMap(),
+    /** Group-only: participants whose incoming audio THIS device has locally silenced — a
+     *  listener-side preference that never reaches the network, so nobody else's call is
+     *  affected, and it resets when the call ends. */
+    val locallyMutedUsers: Set<String> = emptySet(),
     // Whether OUR OWN mic/camera is unavailable because the OS permission is denied — computed
     // once from the current permission state when the call starts/is answered (not a live
     // permission-change listener). The peer can still be heard/seen fine (see LocalMedia); this
@@ -99,6 +105,10 @@ class CallCenter(context: Context, private val client: RelayClient) {
 
     /** Own display name for the self-view fallback (CallUi.kt) when the local camera is off. */
     val myDisplayName: String? get() = client.me?.displayName
+    val modules: dev.relay.core.RelayModules get() = client.modules
+    /** Live module flags for Compose (CallUi.kt's CallButtons) — updates immediately on the
+     *  server's `modules_updated` push, no reconnect needed. */
+    val modulesFlow: kotlinx.coroutines.flow.StateFlow<dev.relay.core.RelayModules> get() = client.modulesFlow
     /** Own userId, for filtering self out of a group call's participant grid (CallUi.kt). */
     val myUserId: String? get() = client.userId
 
@@ -108,6 +118,13 @@ class CallCenter(context: Context, private val client: RelayClient) {
 
     val current get() = _state.value.call
     fun clearError() = _state.update { it.copy(error = null) }
+
+    /** Local-only "don't let me hear this person" toggle — never sent over the wire. */
+    fun toggleLocalMute(userId: String) {
+        val muted = userId !in _state.value.locallyMutedUsers
+        _state.update { it.copy(locallyMutedUsers = if (muted) it.locallyMutedUsers + userId else it.locallyMutedUsers - userId) }
+        peers[userId]?.setLocalMute(muted)
+    }
 
     /**
      * Entry point for an FCM data message (see RelayCallPush / protocol/events.md "Push wake-ups").
@@ -120,6 +137,7 @@ class CallCenter(context: Context, private val client: RelayClient) {
             is CallPush.Invite -> {
                 val cur = current
                 if (cur != null || push.callerId == client.userId) return CallPush.Outcome.IGNORED
+                client.config.debugLog { "[relay] call ${push.callId} incoming" }
                 setCall { ActiveCall(push.callId, push.conversationId, push.callerId, push.callerName, push.type, CallPhase.INCOMING) }
                 // The socket carries the offer/ICE once the user answers — open it now so answering
                 // doesn't pay the connect latency (idempotent when already connected). The socket's
@@ -178,6 +196,7 @@ class CallCenter(context: Context, private val client: RelayClient) {
                 val participantIds = if (isGroup) (listOfNotNull(me) + conversation.members.map { it.userId }.filterNot { it == me }).distinct()
                     else listOfNotNull(peer?.userId)
                 val displayPeerId = peer?.userId ?: participantIds.firstOrNull { it != me } ?: ""
+                client.config.debugLog { "[relay] call $callId outgoing" }
                 // Local state first: the callee(s) may answer/decline during our permission prompt.
                 setCall { ActiveCall(callId, conversation.id, displayPeerId, peer?.displayName, type, CallPhase.OUTGOING, isGroup = isGroup, participantIds = participantIds) }
                 scheduleRing(callId)
@@ -227,6 +246,7 @@ class CallCenter(context: Context, private val client: RelayClient) {
         if (cur.phase != CallPhase.INCOMING) return
         val callId = cur.id
         answeringCallId = callId
+        client.config.debugLog { "[relay] call $callId answered" }
         scope.launch {
             var m: PeerConnectionManager? = null
             try {
@@ -294,8 +314,8 @@ class CallCenter(context: Context, private val client: RelayClient) {
         }
     }
 
-    fun decline() { val cur = current ?: return; if (cur.phase != CallPhase.INCOMING) return; scope.launch { runCatching { client.api.declineCall(cur.id) } }; cleanup() }
-    fun hangUp() { val cur = current ?: return; scope.launch { runCatching { if (cur.phase == CallPhase.INCOMING) client.api.declineCall(cur.id) else client.api.endCall(cur.id) } }; cleanup() }
+    fun decline() { val cur = current ?: return; if (cur.phase != CallPhase.INCOMING) return; client.config.debugLog { "[relay] call ${cur.id} declined" }; scope.launch { runCatching { client.api.declineCall(cur.id) } }; cleanup() }
+    fun hangUp() { val cur = current ?: return; client.config.debugLog { "[relay] call ${cur.id} ended" }; scope.launch { runCatching { if (cur.phase == CallPhase.INCOMING) client.api.declineCall(cur.id) else client.api.endCall(cur.id) } }; cleanup() }
     fun toggleMic() {
         _state.update { it.copy(micEnabled = !it.micEnabled) }
         localMedia?.setMicEnabled(_state.value.micEnabled)
@@ -310,7 +330,10 @@ class CallCenter(context: Context, private val client: RelayClient) {
     private fun applySpeaker() { runCatching { audioManager.mode = AudioManager.MODE_IN_COMMUNICATION; @Suppress("DEPRECATION") audioManager.isSpeakerphoneOn = _state.value.speakerEnabled } }
 
     private suspend fun iceServers(): List<PeerConnectionManager.IceServer> =
-        runCatching { client.api.turnCredentials() }.getOrNull()?.let { listOf(PeerConnectionManager.IceServer(it.urls, it.username, it.credential)) } ?: emptyList()
+        runCatching { client.api.turnCredentials() }
+            .onSuccess { turn -> client.config.debugLog { "[relay] TURN credentials fetched (${turn?.urls?.size ?: 0} ICE server URLs)" } }
+            .onFailure { e -> client.config.debugLog { "[relay] TURN credentials fetch failed: ${e.javaClass.simpleName} ${redactedUrl(e.message ?: "")}" } }
+            .getOrNull()?.let { listOf(PeerConnectionManager.IceServer(it.urls, it.username, it.credential)) } ?: emptyList()
 
     private fun makeManager(callId: String, userId: String): PeerConnectionManager {
         val m = PeerConnectionManager(appContext)
@@ -330,7 +353,10 @@ class CallCenter(context: Context, private val client: RelayClient) {
                     m.noteConnected()
                     if (!isGroup) { connectJob?.cancel(); graceJob?.cancel(); restartJob?.cancel(); graceJob = null }
                     else connectJob?.cancel()
-                    if (current?.phase != CallPhase.ACTIVE) setCall { it?.copy(phase = CallPhase.ACTIVE, startedAtMs = it.startedAtMs ?: System.currentTimeMillis()) }
+                    if (current?.phase != CallPhase.ACTIVE) {
+                        client.config.debugLog { "[relay] call $callId active" }
+                        setCall { it?.copy(phase = CallPhase.ACTIVE, startedAtMs = it.startedAtMs ?: System.currentTimeMillis()) }
+                    }
                     applySpeaker()
                 }
                 PeerConnection.PeerConnectionState.DISCONNECTED -> connectionLost(callId, false, m, userId)
@@ -376,7 +402,7 @@ class CallCenter(context: Context, private val client: RelayClient) {
             runCatching { m.restartIce() }.getOrNull()?.let { sendSignal("call_offer", "sdp", callId, userId, sdpJson(it)) } }
     }
 
-    private fun fail(callId: String, message: String) { scope.launch { runCatching { client.api.endCall(callId, "failed") } }; _state.update { it.copy(error = message) }; cleanup() }
+    private fun fail(callId: String, message: String) { client.config.debugLog { "[relay] call $callId failed" }; scope.launch { runCatching { client.api.endCall(callId, "failed") } }; _state.update { it.copy(error = message) }; cleanup() }
     private fun scheduleRing(callId: String) { ringJob?.cancel(); ringJob = scope.launch { delay(45_000); if (current?.id == callId && current?.phase == CallPhase.OUTGOING) { runCatching { client.api.endCall(callId, "timeout") }; cleanup() } } }
     private fun scheduleConnect(callId: String) { connectJob?.cancel(); connectJob = scope.launch { delay(25_000); if (current?.id == callId && current?.phase == CallPhase.CONNECTING) fail(callId, "Call failed to connect — check your network.") } }
 
@@ -392,13 +418,17 @@ class CallCenter(context: Context, private val client: RelayClient) {
     private fun handle(e: CallEvent) {
         val cur = current
         when (e) {
-            is CallEvent.Invite -> if (e.callerId != client.userId && cur == null) setCall { ActiveCall(e.callId, e.conversationId, e.callerId, e.callerName, e.type, CallPhase.INCOMING, isGroup = e.isGroup, participantIds = e.participantIds) }
+            is CallEvent.Invite -> if (e.callerId != client.userId && cur == null) {
+                client.config.debugLog { "[relay] call ${e.callId} incoming" }
+                setCall { ActiveCall(e.callId, e.conversationId, e.callerId, e.callerName, e.type, CallPhase.INCOMING, isGroup = e.isGroup, participantIds = e.participantIds) }
+            }
             is CallEvent.Accepted -> {
                 // 1:1-only (a group call's per-member join uses call_participant_joined instead).
                 if (cur == null || cur.isGroup) return
                 if (cur.id == e.callId && cur.phase == CallPhase.INCOMING && e.acceptedBy == client.userId && answeringCallId != e.callId) { cleanup(); return }
                 if (cur.id != e.callId || cur.phase != CallPhase.OUTGOING) return
                 ringJob?.cancel()
+                client.config.debugLog { "[relay] call ${e.callId} answered" }
                 setCall { it?.copy(phase = CallPhase.CONNECTING) }
                 scheduleConnect(e.callId)
                 val m = peers[cur.peerId]
@@ -439,9 +469,9 @@ class CallCenter(context: Context, private val client: RelayClient) {
                 if (m != null && cur?.id == e.callId) m.addRemoteIceCandidate(e.candidate)
                 else if (cur == null || cur.id == e.callId) synchronized(pendingCandidates) { if (pendingCandidates.size < 64) pendingCandidates.add(Triple(e.callId, senderId, e.candidate)) }
             }
-            is CallEvent.Declined -> if (cur?.id == e.callId) cleanup()
-            is CallEvent.Missed -> if (cur?.id == e.callId) cleanup()
-            is CallEvent.Ended -> if (cur?.id == e.callId) cleanup()
+            is CallEvent.Declined -> if (cur?.id == e.callId) { client.config.debugLog { "[relay] call ${e.callId} declined" }; cleanup() }
+            is CallEvent.Missed -> if (cur?.id == e.callId) { client.config.debugLog { "[relay] call ${e.callId} missed" }; cleanup() }
+            is CallEvent.Ended -> if (cur?.id == e.callId) { client.config.debugLog { "[relay] call ${e.callId} ended" }; cleanup() }
             is CallEvent.MediaState -> if (cur?.id == e.callId) {
                 // Each toggle sends only the ONE field that changed — the other is null on this
                 // event, not false — so each side is applied independently or a mic-only update
@@ -462,11 +492,19 @@ class CallCenter(context: Context, private val client: RelayClient) {
                     }
                 }
             }
-            is CallEvent.ParticipantJoined -> if (cur?.id == e.callId) setCall { it?.copy(participantIds = e.participantIds) }
+            is CallEvent.ParticipantJoined -> if (cur?.id == e.callId) {
+                // Someone answered — stop the "nobody's answering" ring timeout (mirrors the 1:1
+                // Accepted handler). Without this a group call the caller placed self-destructs at
+                // the 45s ring timeout even when other members are actively on it, because nothing
+                // else moves the caller's own phase off OUTGOING until ITS OWN peer connection
+                // reaches CONNECTED.
+                ringJob?.cancel()
+                setCall { it?.copy(participantIds = e.participantIds) }
+            }
             is CallEvent.ParticipantDeclined -> if (cur?.id == e.callId) setCall { it?.copy(participantIds = it.participantIds.filter { id -> id != e.userId }) }
             is CallEvent.ParticipantLeft -> if (cur?.id == e.callId) {
                 peers.remove(e.userId)?.close()
-                _state.update { it.copy(remoteVideoTracks = it.remoteVideoTracks - e.userId, remoteParticipantMedia = it.remoteParticipantMedia - e.userId) }
+                _state.update { it.copy(remoteVideoTracks = it.remoteVideoTracks - e.userId, remoteParticipantMedia = it.remoteParticipantMedia - e.userId, locallyMutedUsers = it.locallyMutedUsers - e.userId) }
                 setCall { it?.copy(participantIds = it.participantIds.filter { id -> id != e.userId }) }
             }
         }

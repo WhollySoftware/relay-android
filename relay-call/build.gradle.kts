@@ -8,7 +8,7 @@ android {
     namespace = "dev.relay.call"
     compileSdk = 36
     defaultConfig { minSdk = 26 }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     testOptions { unitTests.isReturnDefaultValues = true }
@@ -22,6 +22,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.activity.compose)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
 }

@@ -16,8 +16,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
@@ -31,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import dev.relay.core.LinkPreview
+import dev.relay.core.LocalRelayIcons
 import dev.relay.core.RelayApi
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -116,6 +115,8 @@ fun LinkPreviewCard(api: RelayApi, url: String, isOwn: Boolean, fg: androidx.com
  *  renders its own `LinkPreviewCard` from the same URL once the message lands. */
 @Composable
 fun ComposeLinkPreviewCard(api: RelayApi, url: String, onDismiss: () -> Unit) {
+    // Plain non-null default (see RelayIcons.kt) — safe regardless of caller.
+    val icons = LocalRelayIcons.current
     val preview = rememberLinkPreview(api, url)
     if (preview == null || (preview.title == null && preview.description == null)) return
     Row(
@@ -135,6 +136,6 @@ fun ComposeLinkPreviewCard(api: RelayApi, url: String, onDismiss: () -> Unit) {
             Text(preview.title ?: preview.url, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             preview.description?.let { Text(it, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
-        IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, "Dismiss link preview") }
+        IconButton(onClick = onDismiss) { Icon(icons.close, "Dismiss link preview") }
     }
 }

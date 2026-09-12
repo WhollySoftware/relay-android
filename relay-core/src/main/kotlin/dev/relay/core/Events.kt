@@ -24,6 +24,9 @@ sealed class RelayEvent {
     data class MembersAdded(val conversationId: String, val userIds: List<String>) : RelayEvent()
     data class MemberRemoved(val conversationId: String, val userId: String) : RelayEvent()
     data class MemberLeft(val conversationId: String, val userId: String) : RelayEvent()
+    /** Project-wide module-gating push (super admin changed a project's flags). Always carries the
+     *  full, current module set — not a partial patch. */
+    data class ModulesUpdated(val modules: RelayModules) : RelayEvent()
     /** Anything else (e.g. call_* frames handled by relay-call). */
     data class Unknown(val event: String, val payload: JsonObject) : RelayEvent()
 
@@ -48,6 +51,7 @@ sealed class RelayEvent {
                 "members_added" -> MembersAdded(s("conversationId") ?: return null, obj["userIds"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList())
                 "member_removed" -> MemberRemoved(s("conversationId") ?: return null, s("userId") ?: return null)
                 "member_left" -> MemberLeft(s("conversationId") ?: return null, s("userId") ?: return null)
+                "modules_updated" -> ModulesUpdated(obj["modules"]?.jsonObject?.let { RelayJson.json.decodeFromJsonElement(RelayModules.serializer(), it) } ?: return null)
                 else -> Unknown(event, obj)
             }
         }

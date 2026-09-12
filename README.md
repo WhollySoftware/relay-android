@@ -109,6 +109,40 @@ relay.chat.sendMessage(convo.id, "hello")
 relay.chat.state.collect { snapshot -> /* conversations, threads, typing, presence, totalUnread */ }
 ```
 
+## Debugging
+
+`RelayConfig` takes a `logger` callback (`((String) -> Unit)?`) plus a `debug: Boolean = false`
+flag. With `debug = false` (the default) the SDK stays silent apart from two minimal connection
+lines; set `debug = true` and pass a `logger` to get verbose diagnostics for connection, REST, and
+call issues:
+
+```kotlin
+val relay = RelayClient(RelayConfig(
+    baseUrl = "https://relay.example.com",
+    publicKey = "pk_…",
+    tokenProvider = { myBackend.relayToken() },
+    debug = BuildConfig.DEBUG,
+    logger = { msg -> Log.d("Relay", msg) },
+))
+```
+
+A log line looks like:
+
+```
+[relay] connecting to wss://relay.example.com
+[relay] connected
+[relay] -> GET /conversations
+[relay] <- GET /conversations 200
+[relay] event: chat_message conversationId=c_1 messageId=m_9
+[relay] modules updated: videoCalls=false
+[relay] call call_123 answered
+[relay] TURN credentials fetched (2 ICE server URLs)
+```
+
+Debug logs never include auth tokens, TURN credentials, message content, attachment URLs, or user
+display names/avatars — only connection state, request paths (no query strings), event types, and
+non-content ids.
+
 ## Status
 
 Chat (`relay-core`, `relay-ui`), calling (`relay-call`) and push wake-up (FCM data → foreground

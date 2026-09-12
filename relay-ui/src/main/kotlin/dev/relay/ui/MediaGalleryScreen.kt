@@ -14,8 +14,6 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -40,6 +38,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import dev.relay.core.LocalRelayIcons
 import dev.relay.core.Message
 import dev.relay.core.RelayClient
 import kotlinx.coroutines.launch
@@ -95,6 +94,9 @@ fun MediaGalleryScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Plain non-null default (see RelayIcons.kt) — safe regardless of caller; a nested
+    // sub-screen reached via GroupDetailScreen, not a top-level entry point.
+    val icons = LocalRelayIcons.current
     val scope = rememberCoroutineScope()
     var tab by remember(conversationId) { mutableStateOf(0) } // 0 = Media, 1 = Docs
     var messages by remember(conversationId) { mutableStateOf<List<Message>?>(null) }
@@ -124,7 +126,7 @@ fun MediaGalleryScreen(
 
     Column(modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+            IconButton(onClick = onBack) { Icon(icons.back, "Back") }
             Text("Media, links & docs", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
         }
         HorizontalDivider()

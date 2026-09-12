@@ -30,32 +30,17 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Forward
-import androidx.compose.material.icons.automirrored.filled.Reply
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.AttachFile
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Done
-import androidx.compose.material.icons.filled.DoneAll
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -65,17 +50,26 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import dev.relay.core.ChatSnapshot
 import dev.relay.core.Conversation
+import dev.relay.core.LocalRelayColors
+import dev.relay.core.LocalRelayIcons
+import dev.relay.core.LocalRelayTypography
 import dev.relay.core.Message
 import dev.relay.core.MessageStatus
 import dev.relay.core.RelayClient
+import dev.relay.core.RelayColors
+import dev.relay.core.RelayIcons
+import dev.relay.core.RelayTypography
+import dev.relay.core.RelayUser
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -92,35 +86,71 @@ import java.time.format.DateTimeFormatter
  *     RelayChat(client = relay)
  */
 @Composable
-fun RelayChat(client: RelayClient, modifier: Modifier = Modifier, onPickGroupMembers: (suspend () -> List<String>?)? = null) {
-    var selected by rememberSaveable { mutableStateOf<String?>(null) }
-    val connection by client.connection.collectAsStateWithLifecycle()
-    LaunchedEffect(client) { runCatching { client.connect() } }
-    Column(modifier.fillMaxSize()) {
-        if (connection.state.name != "CONNECTED" && connection.state.name != "IDLE") {
-            Text(
-                when (connection.state.name) { "CONNECTING" -> "Connecting…"; "RECONNECTING" -> "Reconnecting…"; else -> "Disconnected" },
-                Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(4.dp),
-                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+fun RelayChat(
+    client: RelayClient,
+    modifier: Modifier = Modifier,
+    onPickGroupMembers: (suspend () -> List<String>?)? = null,
+    onSearchPeople: (suspend (query: String) -> List<RelayUser>)? = null,
+    icons: RelayIcons? = null,
+    typography: RelayTypography? = null,
+) {
+    // Resolved once here and re-provided, so every Relay composable nested underneath (through
+    // ConversationList/MessageThread) sees a non-null LocalRelayColors.current whether or not the
+    // host ever wraps anything in RelayTheme — see RelayColors.kt.
+    val resolvedColors = LocalRelayColors.current ?: RelayColors.fromMaterialTheme(MaterialTheme.colorScheme)
+    val resolvedIcons = icons ?: LocalRelayIcons.current
+    val resolvedTypography = typography ?: LocalRelayTypography.current
+    val density = LocalDensity.current
+    val textStyle = LocalTextStyle.current
+    CompositionLocalProvider(
+        LocalRelayColors provides resolvedColors,
+        LocalRelayIcons provides resolvedIcons,
+        LocalDensity provides Density(density.density, density.fontScale * resolvedTypography.fontScale),
+        LocalTextStyle provides textStyle.copy(fontFamily = resolvedTypography.fontFamily ?: textStyle.fontFamily),
+    ) {
+        var selected by rememberSaveable { mutableStateOf<String?>(null) }
+        val connection by client.connection.collectAsStateWithLifecycle()
+        LaunchedEffect(client) { runCatching { client.connect() } }
+        Column(modifier.fillMaxSize()) {
+            if (connection.state.name != "CONNECTED" && connection.state.name != "IDLE") {
+                Text(
+                    when (connection.state.name) { "CONNECTING" -> "Connecting…"; "RECONNECTING" -> "Reconnecting…"; else -> "Disconnected" },
+                    Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(4.dp),
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            val id = selected
+            if (id == null) ConversationList(client, onSelect = { selected = it.id })
+            else MessageThread(client, conversationId = id, onBack = { selected = null }, onPickGroupMembers = onPickGroupMembers, onSearchPeople = onSearchPeople)
         }
-        val id = selected
-        if (id == null) ConversationList(client, onSelect = { selected = it.id })
-        else MessageThread(client, conversationId = id, onBack = { selected = null }, onPickGroupMembers = onPickGroupMembers)
     }
 }
 
 @Composable
-fun ConversationList(client: RelayClient, onSelect: (Conversation) -> Unit, includeEmpty: Boolean = true, modifier: Modifier = Modifier) {
-    val state by client.chat.state.collectAsStateWithLifecycle()
-    LaunchedEffect(client) { runCatching { client.chat.loadConversations(includeEmpty) } }
-    Box(modifier.fillMaxSize()) {
-        if (!state.conversationsLoaded && state.conversationsLoading) CircularProgressIndicator(Modifier.align(Alignment.Center))
-        else if (state.conversationsLoaded && state.conversations.isEmpty()) Text("No conversations yet", Modifier.align(Alignment.Center), color = MaterialTheme.colorScheme.onSurfaceVariant)
-        LazyColumn {
-            items(state.conversations, key = { it.id }) { c ->
-                ConversationRow(c, state, myUserId = client.userId, onClick = { onSelect(c) })
-                HorizontalDivider()
+fun ConversationList(client: RelayClient, onSelect: (Conversation) -> Unit, includeEmpty: Boolean = true, modifier: Modifier = Modifier, icons: RelayIcons? = null, typography: RelayTypography? = null) {
+    // See RelayChat's identical resolution — ConversationList is also callable as a host's own
+    // top-level screen, without going through RelayChat.
+    val resolvedColors = LocalRelayColors.current ?: RelayColors.fromMaterialTheme(MaterialTheme.colorScheme)
+    val resolvedIcons = icons ?: LocalRelayIcons.current
+    val resolvedTypography = typography ?: LocalRelayTypography.current
+    val density = LocalDensity.current
+    val textStyle = LocalTextStyle.current
+    CompositionLocalProvider(
+        LocalRelayColors provides resolvedColors,
+        LocalRelayIcons provides resolvedIcons,
+        LocalDensity provides Density(density.density, density.fontScale * resolvedTypography.fontScale),
+        LocalTextStyle provides textStyle.copy(fontFamily = resolvedTypography.fontFamily ?: textStyle.fontFamily),
+    ) {
+        val state by client.chat.state.collectAsStateWithLifecycle()
+        LaunchedEffect(client) { runCatching { client.chat.loadConversations(includeEmpty) } }
+        Box(modifier.fillMaxSize()) {
+            if (!state.conversationsLoaded && state.conversationsLoading) CircularProgressIndicator(Modifier.align(Alignment.Center))
+            else if (state.conversationsLoaded && state.conversations.isEmpty()) Text("No conversations yet", Modifier.align(Alignment.Center), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            LazyColumn {
+                items(state.conversations, key = { it.id }) { c ->
+                    ConversationRow(c, state, myUserId = client.userId, onClick = { onSelect(c) })
+                    HorizontalDivider()
+                }
             }
         }
     }
@@ -163,7 +193,40 @@ fun MessageThread(
     headerActions: @Composable (Conversation) -> Unit = {},
     modifier: Modifier = Modifier,
     onPickGroupMembers: (suspend () -> List<String>?)? = null,
+    onSearchPeople: (suspend (query: String) -> List<RelayUser>)? = null,
+    icons: RelayIcons? = null,
+    typography: RelayTypography? = null,
 ) {
+    // See RelayChat's identical resolution — MessageThread is also callable as a host's own
+    // top-level screen. The actual body is extracted to MessageThreadContent below because it
+    // returns early (group-detail / message-info sub-screens), and a `return` isn't legal inside
+    // CompositionLocalProvider's `content` lambda parameter.
+    val resolvedColors = LocalRelayColors.current ?: RelayColors.fromMaterialTheme(MaterialTheme.colorScheme)
+    val resolvedIcons = icons ?: LocalRelayIcons.current
+    val resolvedTypography = typography ?: LocalRelayTypography.current
+    val density = LocalDensity.current
+    val textStyle = LocalTextStyle.current
+    CompositionLocalProvider(
+        LocalRelayColors provides resolvedColors,
+        LocalRelayIcons provides resolvedIcons,
+        LocalDensity provides Density(density.density, density.fontScale * resolvedTypography.fontScale),
+        LocalTextStyle provides textStyle.copy(fontFamily = resolvedTypography.fontFamily ?: textStyle.fontFamily),
+    ) {
+        MessageThreadContent(client, conversationId, onBack, headerActions, modifier, onPickGroupMembers, onSearchPeople)
+    }
+}
+
+@Composable
+private fun MessageThreadContent(
+    client: RelayClient,
+    conversationId: String,
+    onBack: (() -> Unit)?,
+    headerActions: @Composable (Conversation) -> Unit,
+    modifier: Modifier,
+    onPickGroupMembers: (suspend () -> List<String>?)?,
+    onSearchPeople: (suspend (query: String) -> List<RelayUser>)?,
+) {
+    val icons = LocalRelayIcons.current
     val state by client.chat.state.collectAsStateWithLifecycle()
     val thread = state.thread(conversationId)
     val conversation = state.conversation(conversationId)
@@ -216,6 +279,7 @@ fun MessageThread(
             conversation = conversation,
             onBack = { showGroupDetail = false },
             onPickAdd = onPickGroupMembers,
+            onSearchPeople = onSearchPeople,
             modifier = modifier.fillMaxSize(),
         )
         return
@@ -234,7 +298,7 @@ fun MessageThread(
     }
     Column(modifier.fillMaxSize().imePadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+            if (onBack != null) IconButton(onClick = onBack) { Icon(icons.back, "Back") }
             conversation?.let { c ->
                 Box {
                     Avatar(name = c.title, url = if (c.isGroup) c.photoUrl else c.peer?.avatarUrl, size = 36.dp)
@@ -343,7 +407,11 @@ private fun callMessageInfo(body: String): Pair<String, Boolean>? = when {
 
 @Composable
 private fun CallMessageBubble(label: String, missed: Boolean, isVideo: Boolean, time: String, isOwn: Boolean) {
-    val tint = if (missed) Color(0xFFE53935) else Color(0xFF4CAF50)
+    // Safe non-null: only ever reached from MessageBubbleContent, which resolves/provides
+    // LocalRelayColors before calling this.
+    val colors = LocalRelayColors.current!!
+    val icons = LocalRelayIcons.current
+    val tint = if (missed) colors.danger else colors.online
     Row(
         Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(18.dp))
             .border(1.dp, tint.copy(alpha = 0.5f), RoundedCornerShape(18.dp))
@@ -352,7 +420,7 @@ private fun CallMessageBubble(label: String, missed: Boolean, isVideo: Boolean, 
     ) {
         Box(Modifier.size(34.dp).clip(RoundedCornerShape(999.dp)).background(tint), contentAlignment = Alignment.Center) {
             Icon(
-                if (isVideo) Icons.Filled.Videocam else Icons.Filled.Call,
+                if (isVideo) icons.cameraOn else icons.callAnswer,
                 contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp),
             )
         }
@@ -366,6 +434,9 @@ private fun CallMessageBubble(label: String, missed: Boolean, isVideo: Boolean, 
 /** A voice-message bubble's play/pause + elapsed-or-duration row. */
 @Composable
 fun VoiceMessageRow(messageId: String, audioUrl: String, durationSec: Int?, tint: Color) {
+    // Standalone-safe: LocalRelayIcons always has a non-null default (see RelayIcons.kt), so
+    // this needs no ancestor to have provided anything, unlike LocalRelayColors.
+    val icons = LocalRelayIcons.current
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     val playing = ChatAudioPlayer.isPlaying(messageId)
@@ -375,14 +446,38 @@ fun VoiceMessageRow(messageId: String, audioUrl: String, durationSec: Int?, tint
         Modifier.clickable { ChatAudioPlayer.toggle(context, scope, messageId, audioUrl) }.padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Icon(if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (playing) "Pause" else "Play voice message", tint = tint)
+        Icon(if (playing) icons.pauseVideo else icons.playVideo, if (playing) "Pause" else "Play voice message", tint = tint)
         Text("${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}", fontSize = 13.sp, color = tint)
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = null, senderName: String? = null, seen: Boolean? = null, onRetry: () -> Unit = {}, onDiscard: () -> Unit = {}, onReply: () -> Unit = {}, onDelete: (() -> Unit)? = null, onForward: ((Message) -> Unit)? = null, onShowInfo: (() -> Unit)? = null) {
+fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = null, senderName: String? = null, seen: Boolean? = null, onRetry: () -> Unit = {}, onDiscard: () -> Unit = {}, onReply: () -> Unit = {}, onDelete: (() -> Unit)? = null, onForward: ((Message) -> Unit)? = null, onShowInfo: (() -> Unit)? = null, icons: RelayIcons? = null, typography: RelayTypography? = null) {
+    // See RelayChat's identical resolution — MessageBubble is also callable standalone (e.g. a
+    // host building its own message list). The body is extracted to MessageBubbleContent below
+    // because it returns early for call-summary messages, and `return` isn't legal inside
+    // CompositionLocalProvider's `content` lambda parameter.
+    val resolvedColors = LocalRelayColors.current ?: RelayColors.fromMaterialTheme(MaterialTheme.colorScheme)
+    val resolvedIcons = icons ?: LocalRelayIcons.current
+    val resolvedTypography = typography ?: LocalRelayTypography.current
+    val density = LocalDensity.current
+    val textStyle = LocalTextStyle.current
+    CompositionLocalProvider(
+        LocalRelayColors provides resolvedColors,
+        LocalRelayIcons provides resolvedIcons,
+        LocalDensity provides Density(density.density, density.fontScale * resolvedTypography.fontScale),
+        LocalTextStyle provides textStyle.copy(fontFamily = resolvedTypography.fontFamily ?: textStyle.fontFamily),
+    ) {
+        MessageBubbleContent(m, isOwn, api, senderName, seen, onRetry, onDiscard, onReply, onDelete, onForward, onShowInfo)
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MessageBubbleContent(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi?, senderName: String?, seen: Boolean?, onRetry: () -> Unit, onDiscard: () -> Unit, onReply: () -> Unit, onDelete: (() -> Unit)?, onForward: ((Message) -> Unit)?, onShowInfo: (() -> Unit)?) {
+    // Safe non-null default (see RelayIcons.kt) — no wrapping requirement, unlike LocalRelayColors.
+    val icons = LocalRelayIcons.current
     callMessageInfo(m.body)?.let { (label, missed) ->
         Column(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start) {
             CallMessageBubble(label, missed, isVideo = label.contains("Video", ignoreCase = true), time = time(m.createdAt), isOwn = isOwn)
@@ -425,7 +520,7 @@ fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = nu
                                     .background(Color.Black.copy(alpha = 0.3f)).clickable { openFile() },
                             ) {
                                 m.fileThumbnailUrl?.let { AsyncImage(model = it, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
-                                Icon(Icons.Filled.PlayArrow, "Play video", Modifier.align(Alignment.Center).size(40.dp), tint = Color.White)
+                                Icon(icons.playVideo, "Play video", Modifier.align(Alignment.Center).size(40.dp), tint = Color.White)
                                 m.fileDurationSec?.let { sec ->
                                     Text(
                                         "${sec / 60}:${(sec % 60).toString().padStart(2, '0')}", fontSize = 10.sp, color = Color.White,
@@ -439,7 +534,7 @@ fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = nu
                                     .background(Color.Black.copy(alpha = 0.3f)).clickable { openFile() },
                             ) {
                                 AsyncImage(model = m.fileThumbnailUrl, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
-                                Icon(Icons.Filled.AttachFile, "PDF document", Modifier.align(Alignment.Center).size(40.dp), tint = Color.White)
+                                Icon(icons.attach, "PDF document", Modifier.align(Alignment.Center).size(40.dp), tint = Color.White)
                                 Text(
                                     m.fileName ?: "Document", fontSize = 10.sp, color = Color.White, maxLines = 1,
                                     modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(999.dp)).padding(horizontal = 6.dp, vertical = 1.dp),
@@ -450,7 +545,7 @@ fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = nu
                                 Modifier.clip(RoundedCornerShape(10.dp)).clickable { openFile() }.padding(6.dp),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                Icon(Icons.Filled.AttachFile, "File", tint = fg)
+                                Icon(icons.attach, "File", tint = fg)
                                 Column {
                                     Text(m.fileName ?: "File", fontSize = 13.sp, color = fg, maxLines = 1)
                                     m.fileSizeBytes?.let { Text(formatFileSize(it), fontSize = 10.sp, color = fg.copy(alpha = 0.7f)) }
@@ -476,14 +571,14 @@ fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = nu
                             showActions = false
                             clipboard.setText(androidx.compose.ui.text.AnnotatedString(m.body.ifEmpty { m.fileName.orEmpty() }))
                         },
-                        leadingIcon = { Icon(Icons.Filled.ContentCopy, null) },
+                        leadingIcon = { Icon(icons.copy, null) },
                     )
                 }
                 if (!m.deleted && !m.isPending) {
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("Reply") }, onClick = { showActions = false; onReply() }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Reply, null) })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Reply") }, onClick = { showActions = false; onReply() }, leadingIcon = { Icon(icons.reply, null) })
                 }
                 if (onForward != null && !m.deleted && !m.isPending) {
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("Forward") }, onClick = { showActions = false; onForward(m) }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Forward, null) })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Forward") }, onClick = { showActions = false; onForward(m) }, leadingIcon = { Icon(icons.forward, null) })
                 }
                 if (!m.deleted && !m.isPending) {
                     val context = androidx.compose.ui.platform.LocalContext.current
@@ -497,14 +592,14 @@ fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = nu
                                 context.startActivity(android.content.Intent.createChooser(send, null))
                             }
                         },
-                        leadingIcon = { Icon(Icons.Filled.Share, null) },
+                        leadingIcon = { Icon(icons.share, null) },
                     )
                 }
                 if (onShowInfo != null && isOwn && !m.deleted && !m.isPending) {
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("Message info") }, onClick = { showActions = false; onShowInfo() }, leadingIcon = { Icon(Icons.Filled.Info, null) })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Message info") }, onClick = { showActions = false; onShowInfo() }, leadingIcon = { Icon(icons.info, null) })
                 }
                 if (onDelete != null && !m.deleted && !m.isPending && isOwn) {
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("Delete") }, onClick = { showActions = false; onDelete() }, leadingIcon = { Icon(Icons.Filled.Delete, null) })
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("Delete") }, onClick = { showActions = false; onDelete() }, leadingIcon = { Icon(icons.delete, null) })
                 }
             }
         }
@@ -517,9 +612,11 @@ fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = nu
         // no distinct "delivered" signal (only sent vs. read-receipt "seen"), so there's no gray
         // double-check tier here.
         if (seen != null) Icon(
-            if (seen) Icons.Filled.DoneAll else Icons.Filled.Done, contentDescription = if (seen) "Seen" else "Sent",
+            if (seen) icons.checkRead else icons.checkSent, contentDescription = if (seen) "Seen" else "Sent",
             modifier = Modifier.padding(end = 6.dp).size(14.dp),
-            tint = if (seen) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant,
+            // Safe non-null: MessageBubble (the public wrapper) always resolves/provides
+            // LocalRelayColors before calling this (MessageBubbleContent).
+            tint = if (seen) LocalRelayColors.current!!.online else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -540,6 +637,8 @@ fun MessageBubble(m: Message, isOwn: Boolean, api: dev.relay.core.RelayApi? = nu
  */
 @Composable
 fun MessageComposer(client: RelayClient, conversationId: String, replyTo: Message? = null, onCancelReply: () -> Unit = {}) {
+    // Safe non-null default (see RelayIcons.kt) — no wrapping requirement, unlike LocalRelayColors.
+    val icons = LocalRelayIcons.current
     var text by rememberSaveable(conversationId) { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var attachment by remember { mutableStateOf<PickedAttachment?>(null) }
@@ -661,11 +760,11 @@ fun MessageComposer(client: RelayClient, conversationId: String, replyTo: Messag
                     is PickedAttachment.Image -> AsyncImage(model = a.dataUrl, contentDescription = null, modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
                     is PickedAttachment.FileAttachment -> {
                         if (a.thumbnail != null) AsyncImage(model = a.thumbnail, contentDescription = null, modifier = Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)))
-                        else Icon(if (a.mime.startsWith("video/")) Icons.Filled.PlayArrow else Icons.Filled.AttachFile, null, Modifier.size(44.dp))
+                        else Icon(if (a.mime.startsWith("video/")) icons.playVideo else icons.attach, null, Modifier.size(44.dp))
                         Text(a.name, Modifier.weight(1f).padding(start = 6.dp), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     is PickedAttachment.Audio -> {
-                        Icon(Icons.Filled.Mic, null, Modifier.size(28.dp))
+                        Icon(icons.recordVoice, null, Modifier.size(28.dp))
                         Text("Voice message · ${a.durationSec / 60}:${(a.durationSec % 60).toString().padStart(2, '0')}", Modifier.weight(1f).padding(start = 6.dp), style = MaterialTheme.typography.labelSmall)
                     }
                 }
@@ -679,18 +778,21 @@ fun MessageComposer(client: RelayClient, conversationId: String, replyTo: Messag
             }
         }
         error?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
+        val modules by client.modulesFlow.collectAsStateWithLifecycle()
         Row(verticalAlignment = Alignment.Bottom) {
-            Box {
-                IconButton(onClick = { showAttachMenu = true }) { Icon(Icons.Filled.AttachFile, "Attach") }
-                androidx.compose.material3.DropdownMenu(expanded = showAttachMenu, onDismissRequest = { showAttachMenu = false }) {
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("Camera") }, onClick = { showAttachMenu = false; launchCamera() })
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("Gallery") }, onClick = { showAttachMenu = false; galleryLauncher.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageAndVideo)) })
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("File") }, onClick = { showAttachMenu = false; fileLauncher.launch("*/*") })
+            if (modules.chatAttachments) {
+                Box {
+                    IconButton(onClick = { showAttachMenu = true }) { Icon(icons.attach, "Attach") }
+                    androidx.compose.material3.DropdownMenu(expanded = showAttachMenu, onDismissRequest = { showAttachMenu = false }) {
+                        androidx.compose.material3.DropdownMenuItem(text = { Text("Camera") }, onClick = { showAttachMenu = false; launchCamera() })
+                        androidx.compose.material3.DropdownMenuItem(text = { Text("Gallery") }, onClick = { showAttachMenu = false; galleryLauncher.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageAndVideo)) })
+                        androidx.compose.material3.DropdownMenuItem(text = { Text("File") }, onClick = { showAttachMenu = false; fileLauncher.launch("*/*") })
+                    }
                 }
             }
             if (voiceRecorder.isRecording) {
                 Row(Modifier.weight(1f).padding(horizontal = 8.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.Mic, "Recording", tint = MaterialTheme.colorScheme.error)
+                    Icon(icons.recordVoice, "Recording", tint = MaterialTheme.colorScheme.error)
                     Text(" ${voiceRecorder.elapsedSeconds / 60}:${(voiceRecorder.elapsedSeconds % 60).toString().padStart(2, '0')}", Modifier.weight(1f))
                     TextButton(onClick = { voiceRecorder.cancel() }) { Text("Cancel") }
                 }
@@ -698,11 +800,11 @@ fun MessageComposer(client: RelayClient, conversationId: String, replyTo: Messag
                 OutlinedTextField(value = text, onValueChange = { text = it; if (it.isNotBlank()) client.chat.sendTyping(conversationId) }, modifier = Modifier.weight(1f), placeholder = { Text("Message…") }, maxLines = 5, shape = RoundedCornerShape(20.dp))
             }
             if (voiceRecorder.isRecording) {
-                IconButton(onClick = { voiceRecorder.finish()?.let { attachment = it } }) { Icon(Icons.Filled.Stop, "Stop recording", tint = MaterialTheme.colorScheme.error) }
-            } else if (text.isBlank() && attachment == null) {
-                IconButton(onClick = { startRecording() }) { Icon(Icons.Filled.Mic, "Record voice message") }
+                IconButton(onClick = { voiceRecorder.finish()?.let { attachment = it } }) { Icon(icons.stopRecording, "Stop recording", tint = MaterialTheme.colorScheme.error) }
+            } else if (text.isBlank() && attachment == null && modules.chatVoiceMessages) {
+                IconButton(onClick = { startRecording() }) { Icon(icons.recordVoice, "Record voice message") }
             } else {
-                IconButton(onClick = { send() }, enabled = text.isNotBlank() || attachment != null) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = MaterialTheme.colorScheme.primary) }
+                IconButton(onClick = { send() }, enabled = text.isNotBlank() || attachment != null) { Icon(icons.send, "Send", tint = MaterialTheme.colorScheme.primary) }
             }
         }
     }
@@ -710,9 +812,17 @@ fun MessageComposer(client: RelayClient, conversationId: String, replyTo: Messag
 
 @Composable
 fun Avatar(name: String?, url: String?, size: androidx.compose.ui.unit.Dp = 40.dp) {
+    // Standalone-safe (no reliance on an ancestor having wrapped anything): falls back to the
+    // ambient MaterialTheme-derived default, exactly like every other public entry point.
+    val colors = LocalRelayColors.current ?: RelayColors.fromMaterialTheme(MaterialTheme.colorScheme)
     val label = name.orEmpty()
     val hue = (label.fold(0) { h, c -> (h * 31 + c.code) and 0x7fffffff } % 360).toFloat()
-    Box(Modifier.size(size).clip(CircleShape).background(Color.hsv(hue, 0.45f, 0.92f)), contentAlignment = Alignment.Center) {
+    // Only the background's saturation/lightness are promoted to overridable tokens (their
+    // defaults, 0.45f/0.92f, match today's literal exactly). The initials-text pair (0.5f/0.35f)
+    // is left as a literal: it has no corresponding RelayColors field, and background vs. text
+    // intentionally differ here, so there's nothing sensible to wire it to without adding a new
+    // field the published spec doesn't define.
+    Box(Modifier.size(size).clip(CircleShape).background(Color.hsv(hue, colors.avatarSaturation, colors.avatarLightness)), contentAlignment = Alignment.Center) {
         if (url != null) AsyncImage(model = url, contentDescription = label, modifier = Modifier.fillMaxSize())
         else Text(label.split(" ").filter { it.isNotEmpty() }.take(2).map { it.first().uppercaseChar() }.joinToString("").ifEmpty { "?" }, color = Color.hsv(hue, 0.5f, 0.35f), fontWeight = FontWeight.SemiBold)
     }
@@ -720,8 +830,10 @@ fun Avatar(name: String?, url: String?, size: androidx.compose.ui.unit.Dp = 40.d
 
 @Composable
 fun PresenceDot(online: Boolean, modifier: Modifier = Modifier) {
+    // Standalone-safe, same pattern as Avatar above.
+    val colors = LocalRelayColors.current ?: RelayColors.fromMaterialTheme(MaterialTheme.colorScheme)
     Box(modifier.size(12.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surface).padding(2.dp)) {
-        Box(Modifier.fillMaxSize().clip(CircleShape).background(if (online) Color(0xFF22C55E) else Color.Gray))
+        Box(Modifier.fillMaxSize().clip(CircleShape).background(if (online) colors.online else Color.Gray))
     }
 }
 

@@ -223,6 +223,10 @@ class RelayCallService : Service() {
     }
 
     private fun startRinging() {
+        // Silent in debug builds — an audible system ringtone + vibration firing off during local
+        // testing wakes up everyone nearby; release builds ring normally. The notification and
+        // full call flow are unaffected either way.
+        if (BuildConfig.DEBUG) return
         if (ringtone?.isPlaying == true) return
         runCatching {
             val r = RingtoneManager.getRingtone(this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
