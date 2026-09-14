@@ -11,8 +11,8 @@ Requires minSdk 26, Kotlin 2.1, Compose BOM 2025.01.
 ## Install
 
 The SDK is published as three Maven artifacts (`dev.relay:relay-core`, `dev.relay:relay-ui`,
-`dev.relay:relay-call`) to **GitHub Packages**, under the same private `WhollySoftware/relay-android`
-repo the source lives in — nothing is published to a public registry.
+`dev.relay:relay-call`) to **GitHub Packages**, under the same **public** `WhollySoftware/relay-android`
+repo the source lives in.
 
 **1. Add the repository** to your app's `settings.gradle.kts`:
 
@@ -31,11 +31,11 @@ dependencyResolutionManagement {
 }
 ```
 
-**2. Authenticate.** GitHub Packages always requires auth to *read*, even though the artifacts
-are otherwise just normal AARs — that's what keeps them private. Ask WhollySoftware for a
-collaborator invite on `relay-android`, then create your own
+**2. Authenticate.** This is a GitHub quirk, not a permissions gate: GitHub Packages requires a
+signed-in request to *read* an artifact even when the source repo is public and the AAR itself
+has nothing secret in it. Any GitHub account works — no invite needed. Create your own
 [personal access token](https://github.com/settings/tokens) with only the **`read:packages`**
-scope (never `write:packages` or broader). Put it in your **local, gitignored**
+scope (never `write:packages` or broader) and put it in your **local, gitignored**
 `~/.gradle/gradle.properties` — never in the project itself or in source control:
 
 ```properties
@@ -45,6 +45,12 @@ gpr.token=ghp_your_read_only_token
 
 (In CI, set `GITHUB_ACTOR`/`GITHUB_TOKEN` env vars instead — most CI providers inject a scoped
 token for this automatically.)
+
+Prefer not to deal with a token at all? Since the repo is public, you can skip GitHub Packages
+entirely and build from source instead: clone `relay-android`, then in your app's
+`settings.gradle.kts` add `includeBuild("../relay-android")` (or a git submodule at that path) and
+depend on `implementation(project(":relay-ui"))` directly — no credentials required, at the cost
+of building the SDK from source alongside your app instead of a one-line Maven coordinate.
 
 **3. Add the dependency** to your app module:
 
