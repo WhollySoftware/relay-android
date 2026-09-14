@@ -28,6 +28,8 @@ class TokenSource(private val provider: TokenProvider) {
         current = t; t
     }
     fun peek(): String? = current
+    /** Drops the cached token (sign-out) so a client reused for another user can never send the previous one. */
+    fun clear() { current = null }
 }
 
 /** Typed, stateless wrapper over every Relay REST endpoint (protocol/openapi.yaml). */

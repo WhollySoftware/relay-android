@@ -83,6 +83,16 @@ fun RelayCallOverlay(center: CallCenter, icons: RelayIcons? = null, typography: 
     ) {
         val state by center.state.collectAsStateWithLifecycle()
         val call = state.call
+        // Whatever put a call on screen — the user tapping a call button, a host calling
+        // center.start() directly, or a ring arriving while they were typing — the soft keyboard
+        // must go first: left up, it covers the incoming banner's Answer/Decline row and pushes the
+        // in-call controls off the bottom of the screen. Keyed on the call id so it runs once per
+        // call, not on every phase change (an active call may legitimately show a keyboard later).
+        val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+        val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+        LaunchedEffect(call?.id) {
+            if (call != null) { focusManager.clearFocus(force = true); keyboardController?.hide() }
+        }
         Box(Modifier.fillMaxSize()) {
             when (call?.phase) {
                 null -> {}

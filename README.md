@@ -10,8 +10,53 @@ Requires minSdk 26, Kotlin 2.1, Compose BOM 2025.01.
 
 ## Install
 
-Until it is published, add the modules with a Gradle composite or `includeBuild("../relay-sdk/packages/android")`,
-then `implementation(project(":relay-ui"))`.
+The SDK is published as three Maven artifacts (`dev.relay:relay-core`, `dev.relay:relay-ui`,
+`dev.relay:relay-call`) to **GitHub Packages**, under the same private `WhollySoftware/relay-android`
+repo the source lives in — nothing is published to a public registry.
+
+**1. Add the repository** to your app's `settings.gradle.kts`:
+
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        google(); mavenCentral()
+        maven {
+            url = uri("https://maven.pkg.github.com/WhollySoftware/relay-android")
+            credentials {
+                username = providers.gradleProperty("gpr.user").orNull ?: System.getenv("GITHUB_ACTOR")
+                password = providers.gradleProperty("gpr.token").orNull ?: System.getenv("GITHUB_TOKEN")
+            }
+        }
+    }
+}
+```
+
+**2. Authenticate.** GitHub Packages always requires auth to *read*, even though the artifacts
+are otherwise just normal AARs — that's what keeps them private. Ask WhollySoftware for a
+collaborator invite on `relay-android`, then create your own
+[personal access token](https://github.com/settings/tokens) with only the **`read:packages`**
+scope (never `write:packages` or broader). Put it in your **local, gitignored**
+`~/.gradle/gradle.properties` — never in the project itself or in source control:
+
+```properties
+gpr.user=your-github-username
+gpr.token=ghp_your_read_only_token
+```
+
+(In CI, set `GITHUB_ACTOR`/`GITHUB_TOKEN` env vars instead — most CI providers inject a scoped
+token for this automatically.)
+
+**3. Add the dependency** to your app module:
+
+```kotlin
+implementation("dev.relay:relay-ui:1.0.0")   // pulls in relay-core transitively
+implementation("dev.relay:relay-call:1.0.0") // optional — only if you want calling
+```
+
+Each module ships a sources jar for IDE navigation. Publishing a new version (maintainers only):
+bump `RELAY_VERSION_NAME` in `gradle.properties`, then
+`./gradlew :relay-core:publish :relay-ui:publish :relay-call:publish` with `gpr.user`/`gpr.token`
+(or `GITHUB_ACTOR`/`GITHUB_TOKEN`) set to an account with **write** access.
 
 ## The 10-line integration
 

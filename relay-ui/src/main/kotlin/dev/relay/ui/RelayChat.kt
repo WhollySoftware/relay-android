@@ -504,7 +504,7 @@ private fun MessageBubbleContent(m: Message, isOwn: Boolean, api: dev.relay.core
             when {
                 m.deleted -> Text("This message was deleted", color = fg.copy(alpha = 0.7f))
                 else -> {
-                    m.imageUrl?.let {
+                    safeAttachmentUrl(m.imageUrl)?.let {
                         AsyncImage(
                             model = it, contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                             modifier = Modifier.width(220.dp).height(180.dp).clip(RoundedCornerShape(10.dp)),
@@ -513,13 +513,14 @@ private fun MessageBubbleContent(m: Message, isOwn: Boolean, api: dev.relay.core
                     m.audioUrl?.let { url -> VoiceMessageRow(m.clientId ?: m.id, url, m.audioDurationSec, fg) }
                     m.fileUrl?.let { url ->
                         val context = androidx.compose.ui.platform.LocalContext.current
-                        val openFile = { runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))) } }
+                        // Only http(s)/data ever reach ACTION_VIEW — see AttachmentUrls.kt for why.
+                        val openFile = { if (isSafeAttachmentUrl(url)) runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))) } }
                         if (m.isVideo) {
                             Box(
                                 Modifier.width(220.dp).height(140.dp).clip(RoundedCornerShape(10.dp))
                                     .background(Color.Black.copy(alpha = 0.3f)).clickable { openFile() },
                             ) {
-                                m.fileThumbnailUrl?.let { AsyncImage(model = it, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
+                                safeAttachmentUrl(m.fileThumbnailUrl)?.let { AsyncImage(model = it, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
                                 Icon(icons.playVideo, "Play video", Modifier.align(Alignment.Center).size(40.dp), tint = Color.White)
                                 m.fileDurationSec?.let { sec ->
                                     Text(
@@ -533,7 +534,7 @@ private fun MessageBubbleContent(m: Message, isOwn: Boolean, api: dev.relay.core
                                 Modifier.width(220.dp).height(140.dp).clip(RoundedCornerShape(10.dp))
                                     .background(Color.Black.copy(alpha = 0.3f)).clickable { openFile() },
                             ) {
-                                AsyncImage(model = m.fileThumbnailUrl, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                                AsyncImage(model = safeAttachmentUrl(m.fileThumbnailUrl), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
                                 Icon(icons.attach, "PDF document", Modifier.align(Alignment.Center).size(40.dp), tint = Color.White)
                                 Text(
                                     m.fileName ?: "Document", fontSize = 10.sp, color = Color.White, maxLines = 1,
@@ -823,7 +824,8 @@ fun Avatar(name: String?, url: String?, size: androidx.compose.ui.unit.Dp = 40.d
     // intentionally differ here, so there's nothing sensible to wire it to without adding a new
     // field the published spec doesn't define.
     Box(Modifier.size(size).clip(CircleShape).background(Color.hsv(hue, colors.avatarSaturation, colors.avatarLightness)), contentAlignment = Alignment.Center) {
-        if (url != null) AsyncImage(model = url, contentDescription = label, modifier = Modifier.fillMaxSize())
+        val safeUrl = safeAttachmentUrl(url)
+        if (safeUrl != null) AsyncImage(model = safeUrl, contentDescription = label, modifier = Modifier.fillMaxSize())
         else Text(label.split(" ").filter { it.isNotEmpty() }.take(2).map { it.first().uppercaseChar() }.joinToString("").ifEmpty { "?" }, color = Color.hsv(hue, 0.5f, 0.35f), fontWeight = FontWeight.SemiBold)
     }
 }

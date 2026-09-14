@@ -66,7 +66,7 @@ class RelayClient(val config: RelayConfig, okHttp: OkHttpClient? = null) {
     }
 
     /** Closes the connection and clears local state (sign-out). */
-    fun disconnect() { socket.close(); chat.reset(); me = null; _modules.value = RelayModules() }
+    fun disconnect() { socket.close(); chat.reset(); me = null; _modules.value = RelayModules(); api.tokens.clear() }
 
     /** From Activity.onStop: closes the socket and tells the server right away. */
     suspend fun goToBackground() { socket.close(); runCatching { api.goOffline() } }

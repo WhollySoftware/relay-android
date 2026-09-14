@@ -18,3 +18,10 @@ service/uploads/
 .build/
 DerivedData/
 *.xcuserstate
+
+# Android/Gradle
+.gradle/
+local.properties
+*.iml
+.cxx/
+captures/

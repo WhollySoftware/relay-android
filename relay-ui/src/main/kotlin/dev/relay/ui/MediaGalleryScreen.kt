@@ -156,7 +156,7 @@ fun MediaGalleryScreen(
                         }
                         items(group.items, key = { it.id }) { m ->
                             Box(Modifier.aspectRatio(1f).padding(2.dp).clip(MaterialTheme.shapes.small).background(MaterialTheme.colorScheme.surfaceVariant)) {
-                                val thumb = m.imageUrl ?: m.fileThumbnailUrl
+                                val thumb = safeAttachmentUrl(m.imageUrl ?: m.fileThumbnailUrl)
                                 if (thumb != null) {
                                     AsyncImage(model = thumb, contentDescription = null, modifier = Modifier.fillMaxSize())
                                 } else {
